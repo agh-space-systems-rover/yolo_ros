@@ -236,7 +236,7 @@ def detections_to_transforms(detections: Detection2DArray) -> list[TransformStam
 
         # Create the transform.
         transform = TransformStamped()
-        transform.header = detection.header
+        transform.header = detections.header
         transform.child_frame_id = frame_name
         transform.transform.translation.x = detection.results[0].pose.pose.position.x
         transform.transform.translation.y = detection.results[0].pose.pose.position.y

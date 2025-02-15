@@ -347,9 +347,9 @@ class YOLODetect(Node):
         results = self.yolo.predict(color_images, conf=self.confidence_threshold)
 
         # Convert YOLO results to Detection2DArray.
-        stamps = [msg.header.stamp for msg in color_msgs]
+        headers = [msg.header for msg in color_msgs]
         detections: Detection2DArray = node_impl.detection_array_from_yolo_results(
-            self, results, stamps
+            self, results, headers
         )
 
         # # If anything was detected...

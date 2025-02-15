@@ -60,7 +60,7 @@ def lookup_tf_as_matrix(
 
 
 def detection_array_from_yolo_results(
-    node: Any, results: list[Any], stamps: list[Any]
+    node: Any, results: list[Any], headers: list[Any]
 ) -> Detection2DArray:
     detections = Detection2DArray()
     detections.header.stamp = node.get_clock().now().to_msg()
@@ -69,8 +69,7 @@ def detection_array_from_yolo_results(
         for j in range(len(result.boxes)):
             # Set header.
             detection = Detection2D()
-            detection.header.stamp = stamps[i]
-            detection.header.frame_id = node.world_frame
+            detection.header = headers[i]
 
             # Set hypothesis.
             hypothesis = ObjectHypothesisWithPose()
