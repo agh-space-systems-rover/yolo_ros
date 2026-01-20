@@ -1,4 +1,5 @@
-@startuml
+@startuml node_structure
+title YOLO ROS Node Structure
 skinparam classAttributeIconSize 0
 skinparam linetype ortho
 

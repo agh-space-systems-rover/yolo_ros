@@ -1,41 +1,76 @@
-   
+@startuml cpp_structure
+title YOLO ROS C++ Structure
 
-  ' Post-processing 3D
-  if (Czy wykryto obiekty?) then (Nie)
-    :Koniec cyklu;
-  else (Tak)
-    :Oblicz pozycje 3D;
+start
 
-    partition "Logika Pozycjonowania 3D" as Logic3D {
-      if (Dostępna mapa głębi?) then (Tak)
-        :Próbkuj głębię wokół środka wykrycia;
-        if (Próbkowanie udane?) then (Tak)
-          :Z = uśredniona głębia;
-        else (Nie)
-          :Fallback = Oblicz Z z promienia obiektu;
-        endif
-      else (Nie)
-        :Fallback = Oblicz Z z promienia obiektu;
-      endif
+partition "Lifecycle: on_configure()" {
+  :Load Parameters & Models (YoloOpenCVDetector::load);
+  :Initialize Components (Detector, Estimator, Tracker);
+  :Configure Publishers;
+}
 
-      :Z = f(rozmiar_zdeiniowany, rozmiar_w_px);
-      :Rzutuj Pixele (u,v,Z) -> Kamera (X,Y,Z);
-      :Transformuj do world_frame (np. odom);
+partition "Lifecycle: on_activate()" {
+  :Create Subscriptions (message_filters / CompressedWrapper);
+  :Create Timer (create_wall_timer);
+}
+
+partition "timer_callback()" {
+
+  ' Main Loop
+  :Iterate over cameras;
+  if (has_new_data?) then (No)
+    :Skip iteration;
+  else (Yes)
+  
+    :Convert Images (cv_bridge::toCvCopy);
+
+    ' Inference
+    partition "YoloOpenCVDetector::detect()" {
+      :cv::dnn::blobFromImage;
+      :net.forward();
+      :NMSBoxes (Non-Maximum Suppression);
     }
+
+    ' Post-processing 3D
+    if (Objects detected?) then (No)
+      :End;
+    else (Yes)
+      
+      partition "PositionEstimator::compute_3d()" {
+        if (!depth_image.empty()?) then (Yes)
+          :get_depth_from_region();
+          note right: Monte Carlo\nRandom Sampling
+        else (No)
+          :z = -1.0;
+        endif
+
+        if (z <= 0.0?) then (Yes)
+          :estimate_depth_from_size();
+          note right: Fallback based on\nknown valid radius
+        endif
+        
+        if (z > 0.0?) then (Yes)
+          :Pinhole Projection\n(X,Y,Z) = f(u,v,z,fx,fy);
+        else (No)
+           :Reject or set (0,0,0);
+        endif
+      }
+
+      partition "DetectionTracker::process()" {
+        :transform_to_world() (TF2);
+        :Update History & Filter;
+      }
+    endif
+
+    ' Publish
+    :detection_pub_->publish();
+
+    if (publish_annotated_?) then (Yes)
+      :Draw BBoxes on Image;
+      :annotated_pub->publish();
+    endif
+
   endif
-
-  ' Mergowanie i Filtrowanie
-  :Merge Detections (przestrzenne);
-  :Temporal Filter (czasowe);
-
-  ' Publikacja
-  :Publikuj Detections;
-  :Publikuj TF Transform;
-  if (Debug włączony?) then (Tak)
-    :Rysuj i Publikuj Obraz z Ramkami;
-  endif
-
-  :Koniec cyklu;
 
 }
 
