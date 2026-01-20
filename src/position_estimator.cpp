@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <numeric>
 #include <rclcpp/logging.hpp>
+#include <rclcpp/clock.hpp>
 
 
 const int THROTTLE_LOG_INTERVAL_MS = 1000;
@@ -75,8 +76,9 @@ Detection3D PositionEstimator::compute_3d(
     // If still invalid, default to something safe
     if (z <= 0.0f) {
         
+        static rclcpp::Clock clock;
         RCLCPP_WARN_STREAM_THROTTLE(rclcpp::get_logger("PositionEstimator"),
-            *rclcpp::Clock().get_clock_handle(), THROTTLE_LOG_INTERVAL_MS,
+            clock, THROTTLE_LOG_INTERVAL_MS,
             "Unable to estimate depth for detection class_id=" << detection.class_id 
             << " bbox=(" << detection.bbox.x << ", " << detection.bbox.y 
             << ", " << detection.bbox.width << ", " << detection.bbox.height << ")");
