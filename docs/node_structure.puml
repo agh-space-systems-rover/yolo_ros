@@ -1,0 +1,90 @@
+@startuml
+skinparam classAttributeIconSize 0
+
+class YOLODetect {
+    +__init__()
+    +on_configure(state: State) : TransitionCallbackReturn
+    +on_activate(state: State) : TransitionCallbackReturn
+    +on_deactivate(state: State) : TransitionCallbackReturn
+    +on_shutdown(state: State) : TransitionCallbackReturn
+    +on_color(color_msg: Image, i: int)
+    +on_depth(depth_msg: Image, i: int)
+    +on_info(msg: CameraInfo, i: int)
+    +detect()
+
+    -num_cameras : int
+    -subscribe_depth : bool
+    -color_transport : str
+    -depth_transport : str
+    -rate : float
+    -model : str
+    -grayscale : bool
+    -confidence_threshold : float
+    -class_names : list[str]
+    -class_radii : list[float]
+    -world_frame : str
+    -merge_radius : float
+    -temporal_window : int
+    -temporal_threshold : int
+    -publish_tf : bool
+    -publish_annotated : bool
+    -annotated_transport : str
+    -loaded_model : str
+    -bridge : CvBridge
+    -tf_buffer : Buffer
+    -tf_listener : TransformListener
+    -tf_broadcaster : TransformBroadcaster
+    -yolo : YOLO
+    -last_color_msgs : list
+    -last_depth_msgs : list
+    -last_info_msgs : list
+    -new_colors : list[bool]
+    -color_subs : list[Subscription]
+    -depth_subs : list[Subscription]
+    -info_subs : list[Subscription]
+    -detection_pub : Publisher
+    -annotated_pubs : list[Publisher]
+    -detect_timer : Timer
+    -temporal_history : list[DetectionGroup]
+}
+
+class DetectionGroup {
+    +__init__(detection: Detection2D, max_length: int)
+    +push(detection: Detection2D)
+    +center() : np.ndarray
+    +empty() : bool
+    +as_single_detection() : Detection2D
+    +pop()
+    +count() : int
+    +__repr__() : str
+
+    -id : str
+    -detections : deque[Detection2D]
+}
+
+package "detection_msg_utils" {
+    class MsgUtils {
+        {static} +detection_pos(detection: Detection2D) : np.ndarray
+        {static} +detection_distance_3d(detection1: Detection2D, detection2: Detection2D) : float
+        {static} +merge_detections(detections: list[Detection2D]) : Detection2D
+        {static} +merge_detections_by_distance(detections: Detection2DArray, merge_radius: float) : Detection2DArray
+        {static} +temporal_filter(detections: Detection2DArray, temporal_history: list[DetectionGroup], temporal_window: int, temporal_threshold: int, group_radius: float) : Detection2DArray
+        {static} +detections_to_transforms(detections: Detection2DArray) : list[TransformStamped]
+    }
+}
+
+package "yolo_detect_impl" {
+    class NodeImpl {
+        {static} +quat_to_basis(q: np.ndarray) : np.ndarray
+        {static} +lookup_tf_as_matrix(tf_buffer: Buffer, target_frame: str, source_frame: str, time: Time) : np.ndarray
+        {static} +detection_array_from_yolo_results(node: Any, results: list[Any], headers: list[Any]) : Detection2DArray
+        {static} +add_3d_positions_to_detections(node: Any, detections: Detection2DArray, depth_images: list[Any], info_msgs: list[Any]) : Detection2DArray
+    }
+}
+
+YOLODetect *-- DetectionGroup : temporal_history
+YOLODetect ..> MsgUtils : uses
+YOLODetect ..> NodeImpl : uses
+MsgUtils ..> DetectionGroup : uses
+
+@enduml

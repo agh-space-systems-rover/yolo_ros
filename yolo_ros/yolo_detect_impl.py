@@ -13,7 +13,6 @@ POSITION_ESTIMATION_DEPTH_SAMPLES = 100
 
 # helper functions
 
-
 def quat_to_basis(q: np.ndarray) -> np.ndarray:
     return (
         np.array(
