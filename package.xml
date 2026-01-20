@@ -3,22 +3,25 @@
 <package format="3">
   <name>yolo_ros</name>
   <version>0.0.0</version>
-  <description>ROS 2 package that integrates YOLOv8 object detection as a Python node using the Ultralytics library. </description>
-  <maintainer email="63957587+rayferric@users.noreply.github.com">rayferric</maintainer>
-  <license>MIT</license>
+  <description>ROS 2 Lifecycle Node for object detection using YOLO and OpenCV</description>
+  <maintainer email="mateuszwojcikv@gmail.com">mateuszw</maintainer>
+  <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>cv_bridge</exec_depend>
-  <exec_depend>message_filters</exec_depend>
-  <exec_depend>python3-ultralytics-pip</exec_depend>
-  <exec_depend>vision_msgs</exec_depend>
-  <exec_depend>tf2_ros</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>compressed_image_transport</exec_depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>rclcpp_components</depend>
+  <depend>sensor_msgs</depend>
+  <depend>vision_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>image_transport</depend>
+  <depend>message_filters</depend>
+  <depend>libopencv-dev</depend> 
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

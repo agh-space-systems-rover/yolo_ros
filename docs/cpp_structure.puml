@@ -1,8 +1,44 @@
-@startuml
-skinparam classAttributeIconSize 0
+   
 
-class YOLODetect {
-    YOLODetect()
+  ' Post-processing 3D
+  if (Czy wykryto obiekty?) then (Nie)
+    :Koniec cyklu;
+  else (Tak)
+    :Oblicz pozycje 3D;
 
-    
+    partition "Logika Pozycjonowania 3D" as Logic3D {
+      if (Dostępna mapa głębi?) then (Tak)
+        :Próbkuj głębię wokół środka wykrycia;
+        if (Próbkowanie udane?) then (Tak)
+          :Z = uśredniona głębia;
+        else (Nie)
+          :Fallback = Oblicz Z z promienia obiektu;
+        endif
+      else (Nie)
+        :Fallback = Oblicz Z z promienia obiektu;
+      endif
+
+      :Z = f(rozmiar_zdeiniowany, rozmiar_w_px);
+      :Rzutuj Pixele (u,v,Z) -> Kamera (X,Y,Z);
+      :Transformuj do world_frame (np. odom);
+    }
+  endif
+
+  ' Mergowanie i Filtrowanie
+  :Merge Detections (przestrzenne);
+  :Temporal Filter (czasowe);
+
+  ' Publikacja
+  :Publikuj Detections;
+  :Publikuj TF Transform;
+  if (Debug włączony?) then (Tak)
+    :Rysuj i Publikuj Obraz z Ramkami;
+  endif
+
+  :Koniec cyklu;
+
 }
+
+stop
+
+@enduml

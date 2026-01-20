@@ -1,17 +1,19 @@
 # YOLO-ROS
 
-ROS 2 package that integrates YOLOv8 object detection as a Python node using the Ultralytics library. 
+ROS 2 package that integrates YOLOv8 object detection as a Lifecycle C++ node using the OpenCV DNN module. 
 
 ## Output Specification
 
 The objects detected by the node are published to `/detections` as `vision_msgs/Detection2DArray` messages. Before publishing similar detections are merged together and then filtered temporally to eliminate flickering false positives. The node can also publish additional visualizations of the detections to `/annotatedX` (`sensor_msgs/Image`) and `/tf` (`tf2_msgs/TFMessage`).
+
+> **Note**: For C++ implementation, the model file should ideally be in ONNX format (`.onnx`) for best compatibility with OpenCV DNN, although some `.pt` files might load depending on build configuration.
 
 ## How to Launch
 
 ```py
 from ament_index_python import get_package_share_path
 from launch import LaunchDescription
-from launch_ros.actions import Node
+from launch_ros.actions import LifecycleNode
 from launch_ros.descriptions import ParameterFile
 
 def generate_launch_description():
@@ -19,7 +21,8 @@ def generate_launch_description():
         [
             Node(
                 package="yolo_ros",
-                executable="yolo_detect_auto_activate",
+                executable="yolo_detect_node",
+                name="yolo_detect_node",
                 parameters=[
                     ParameterFile(
                         str(get_package_share_path("kalman_yolo") / "config" / "urc2024.yaml"),

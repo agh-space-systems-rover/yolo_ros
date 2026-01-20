@@ -1,0 +1,242 @@
+#include "yolo_ros/detection_tracker.hpp"
+#include <rclcpp/rclcpp.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2/exceptions.h>
+#include <algorithm>
+#include <random>
+
+namespace yolo_ros {
+
+DetectionGroup::DetectionGroup(const Detection3D& initial_detection, int max_history_param) 
+    : max_history_(max_history_param)
+{
+    // Generate simple ID if empty, but usually tracker manages IDs? 
+    // Python code: "if len(detection.id) == 0: detection.id = str(random...)"
+    // Here we can generate a UUID or static counter
+    static int id_counter = 0;
+    id_ = std::to_string(++id_counter); 
+    
+    add_measurement(initial_detection);
+}
+
+void DetectionGroup::add_measurement(const Detection3D& det) {
+    measurements_.push_back(det);
+    if (measurements_.size() > (size_t)max_history_) {
+        measurements_.pop_front();
+    }
+    last_update_ = rclcpp::Clock().now();
+}
+
+bool DetectionGroup::is_confirmed(int temporal_threshold) const {
+    return (int)measurements_.size() >= temporal_threshold;
+}
+
+bool DetectionGroup::is_stale(const rclcpp::Time& current_time, double max_age_seconds) const {
+    // Implementing staleness check
+    try {
+        double seconds = (current_time - last_update_).seconds();
+        return seconds > max_age_seconds;
+    } catch (...) {
+        return true; 
+    }
+}
+
+Detection3D DetectionGroup::get_average_detection() const {
+    if (measurements_.empty()) return Detection3D();
+
+    Detection3D avg = measurements_.back(); // Start with latest metadata
+    
+    double x = 0, y = 0, z = 0;
+    for (const auto& m : measurements_) {
+        x += m.position.x;
+        y += m.position.y;
+        z += m.position.z;
+    }
+    size_t n = measurements_.size();
+    avg.position.x = x / n;
+    avg.position.y = y / n;
+    avg.position.z = z / n;
+    
+    // ID assignment
+    avg.result2d.id = std::stoi(id_); 
+
+    return avg;
+}
+
+// -----------------------------------------------------------------------------
+
+DetectionTracker::DetectionTracker(float merge_radius, int temporal_window, int temporal_threshold)
+    : merge_radius_(merge_radius), temporal_window_(temporal_window), temporal_threshold_(temporal_threshold)
+{}
+
+float DetectionTracker::dist3d(const geometry_msgs::msg::Point& p1, const geometry_msgs::msg::Point& p2) {
+    float dx = p1.x - p2.x;
+    float dy = p1.y - p2.y;
+    float dz = p1.z - p2.z;
+    return std::sqrt(dx*dx + dy*dy + dz*dz);
+}
+
+std::vector<Detection3D> DetectionTracker::process(
+    const std::vector<Detection3D>& new_detections, 
+    const std::shared_ptr<tf2_ros::Buffer>& tf_buffer,
+    const std::string& target_frame
+) {
+    // 1. Transform all incoming to World Frame
+    auto world_detections = transform_to_world(new_detections, tf_buffer, target_frame);
+    
+    // 2. Spatial Merge (consolidate duplicates from overlapping cameras)
+    auto merged = spatial_merge(world_detections);
+    
+    // 3. Temporal Filter (Tracker Logic)
+    return temporal_filter(merged);
+}
+
+std::vector<Detection3D> DetectionTracker::transform_to_world(
+    const std::vector<Detection3D>& dets,
+    const std::shared_ptr<tf2_ros::Buffer>& tf_buffer, 
+    const std::string& target_frame
+) {
+    std::vector<Detection3D> output;
+    output.reserve(dets.size());
+    
+    for (const auto& det : dets) {
+        Detection3D det_world = det;
+        try {
+             // Look up transform
+             geometry_msgs::msg::PoseStamped pose_in, pose_out;
+             pose_in.header = det.header;
+             pose_in.pose.position = det.position;
+             pose_in.pose.orientation.w = 1.0;
+             
+             // Timeout 0.0 because strictly we should have the TF by now or we use latest
+             tf_buffer->transform(pose_in, pose_out, target_frame, tf2::durationFromSec(0.0));
+             
+             det_world.position = pose_out.pose.position;
+             det_world.header = pose_out.header;
+             output.push_back(det_world);
+        } catch (const tf2::TransformException& ex) {
+            // Log?
+            // Fallback: keep original or discard?
+            // If we can't place it in world, we probably can't track it correctly vs others.
+            // But let's keep it to see *something*
+            output.push_back(det); 
+        }
+    }
+    return output;
+}
+
+std::vector<Detection3D> DetectionTracker::spatial_merge(const std::vector<Detection3D>& dets) {
+    // Simple greedy clustering
+    // If Det A and Det B are close (< radius) and same class -> merge
+    // "Merge" means avg position
+    
+    if (dets.empty()) return {};
+    
+    std::vector<Detection3D> merged;
+    std::vector<bool> used(dets.size(), false);
+    
+    for (size_t i = 0; i < dets.size(); ++i) {
+        if (used[i]) continue;
+        
+        std::vector<Detection3D> cluster;
+        cluster.push_back(dets[i]);
+        used[i] = true;
+        
+        for (size_t j = i + 1; j < dets.size(); ++j) {
+            if (used[j]) continue;
+            
+            // Check class
+            if (dets[i].result2d.class_id != dets[j].result2d.class_id) continue;
+            
+            // Check dist
+            if (dist3d(dets[i].position, dets[j].position) < merge_radius_) {
+                cluster.push_back(dets[j]);
+                used[j] = true;
+            }
+        }
+        
+        // Merge cluster
+        Detection3D m = cluster[0];
+        if (cluster.size() > 1) {
+            double x=0, y=0, z=0;
+            float max_score = 0;
+            for (const auto& c : cluster) {
+                x += c.position.x;
+                y += c.position.y;
+                z += c.position.z;
+                if (c.result2d.score > max_score) max_score = c.result2d.score;
+            }
+            m.position.x = x / cluster.size();
+            m.position.y = y / cluster.size();
+            m.position.z = z / cluster.size();
+            m.result2d.score = max_score;
+        }
+        merged.push_back(m);
+    }
+    return merged;
+}
+
+std::vector<Detection3D> DetectionTracker::temporal_filter(const std::vector<Detection3D>& dets) {
+    // Data Assocation: Nearest Neighbor
+    // Update existing groups
+    // Create new groups
+    // Delete stale groups
+    
+    // This is a simplified tracker.
+    
+    std::vector<bool> matched(dets.size(), false);
+    
+    // 1. Update existing tracks
+    for (auto& [id, group] : history_) {
+        double best_dist = merge_radius_;
+        int best_idx = -1;
+        
+        Detection3D center = group.get_average_detection();
+        
+        for (size_t i = 0; i < dets.size(); ++i) {
+            if (matched[i]) continue;
+             // Check class
+            if (dets[i].result2d.class_id != center.result2d.class_id) continue;
+            
+            float d = dist3d(dets[i].position, center.position);
+            if (d < best_dist) {
+                best_dist = d;
+                best_idx = i;
+            }
+        }
+        
+        if (best_idx != -1) {
+            group.add_measurement(dets[best_idx]);
+            matched[best_idx] = true;
+        }
+    }
+    
+    // 2. Create new tracks
+    for (size_t i = 0; i < dets.size(); ++i) {
+        if (!matched[i]) {
+            DetectionGroup new_group(dets[i], temporal_window_);
+            history_.insert({new_group.get_id(), new_group});
+        }
+    }
+    
+    // 3. Collect Output & Cleanup Stale
+    std::vector<Detection3D> output;
+    
+    auto it = history_.begin();
+    while (it != history_.end()) {
+        // Remove if stale (e.g. 1 second no update)
+        if (it->second.is_stale(rclcpp::Clock().now(), 1.0)) {
+            it = history_.erase(it);
+        } else {
+            if (it->second.is_confirmed(temporal_threshold_)) {
+                auto out = it->second.get_average_detection();
+                output.push_back(out);
+            }
+            ++it;
+        }
+    }
+    
+    return output;
+}
+
+} // namespace yolo_ros

@@ -1,90 +1,118 @@
 @startuml
 skinparam classAttributeIconSize 0
+skinparam linetype ortho
 
-class YOLODetect {
-    +__init__()
-    +on_configure(state: State) : TransitionCallbackReturn
-    +on_activate(state: State) : TransitionCallbackReturn
-    +on_deactivate(state: State) : TransitionCallbackReturn
-    +on_shutdown(state: State) : TransitionCallbackReturn
-    +on_color(color_msg: Image, i: int)
-    +on_depth(depth_msg: Image, i: int)
-    +on_info(msg: CameraInfo, i: int)
-    +detect()
+package "yolo_ros_cpp" {
 
-    -num_cameras : int
-    -subscribe_depth : bool
-    -color_transport : str
-    -depth_transport : str
-    -rate : float
-    -model : str
-    -grayscale : bool
-    -confidence_threshold : float
-    -class_names : list[str]
-    -class_radii : list[float]
-    -world_frame : str
-    -merge_radius : float
-    -temporal_window : int
-    -temporal_threshold : int
-    -publish_tf : bool
-    -publish_annotated : bool
-    -annotated_transport : str
-    -loaded_model : str
-    -bridge : CvBridge
-    -tf_buffer : Buffer
-    -tf_listener : TransformListener
-    -tf_broadcaster : TransformBroadcaster
-    -yolo : YOLO
-    -last_color_msgs : list
-    -last_depth_msgs : list
-    -last_info_msgs : list
-    -new_colors : list[bool]
-    -color_subs : list[Subscription]
-    -depth_subs : list[Subscription]
-    -info_subs : list[Subscription]
-    -detection_pub : Publisher
-    -annotated_pubs : list[Publisher]
-    -detect_timer : Timer
-    -temporal_history : list[DetectionGroup]
-}
+    ' --- Główny Node ROS ---
+    class YoloDetectNode {
+        -- Lifecycle --
+        +on_configure(state: State) : CallbackReturn
+        +on_activate(state: State) : CallbackReturn
+        +on_deactivate(state: State) : CallbackReturn
+        +on_cleanup(state: State) : CallbackReturn
+        +on_shutdown(state: State) : CallbackReturn
+        
+        -- Callbacks --
+        -on_camera_data(color, depth, info, camera_index)
+        -timer_callback()
+        
+        -- Members --
+        -detector: unique_ptr<IDetector>
+        -estimator: unique_ptr<PositionEstimator>
+        -tracker: unique_ptr<DetectionTracker>
+        
+        -tf_buffer: shared_ptr<Buffer>
+        -tf_listener: shared_ptr<TransformListener>
+        
+        -cameras_: vector<shared_ptr<CameraContext>>
+        -params: (num_cameras, publish_annotated, etc.)
+    }
 
-class DetectionGroup {
-    +__init__(detection: Detection2D, max_length: int)
-    +push(detection: Detection2D)
-    +center() : np.ndarray
-    +empty() : bool
-    +as_single_detection() : Detection2D
-    +pop()
-    +count() : int
-    +__repr__() : str
+    struct CameraContext {
+        +index: int
+        +color_sub: shared_ptr<SimpleFilter<Image>>
+        +depth_sub: shared_ptr<SimpleFilter<Image>>
+        +info_sub: shared_ptr<Subscriber<CameraInfo>>
+        +sync: shared_ptr<Synchronizer>
+        +annotated_pub: shared_ptr<Publisher>
+        +has_new_data: bool
+    }
+    
+    class CompressedSubscriberWrapper {
+        +CompressedSubscriberWrapper(node, topic, qos)
+        -sub_: Subscription<CompressedImage>
+        -signalMessage(image: Image)
+    }
 
-    -id : str
-    -detections : deque[Detection2D]
-}
+    ' --- Warstwa Inferencji (niezależna od ROS) ---
+    interface IDetector {
+        +{abstract} load(model_path: string, config: Config) : bool
+        +{abstract} detect(images: vector<cv::Mat>) : vector<vector<Result2D>>
+    }
 
-package "detection_msg_utils" {
-    class MsgUtils {
-        {static} +detection_pos(detection: Detection2D) : np.ndarray
-        {static} +detection_distance_3d(detection1: Detection2D, detection2: Detection2D) : float
-        {static} +merge_detections(detections: list[Detection2D]) : Detection2D
-        {static} +merge_detections_by_distance(detections: Detection2DArray, merge_radius: float) : Detection2DArray
-        {static} +temporal_filter(detections: Detection2DArray, temporal_history: list[DetectionGroup], temporal_window: int, temporal_threshold: int, group_radius: float) : Detection2DArray
-        {static} +detections_to_transforms(detections: Detection2DArray) : list[TransformStamped]
+    class YoloOpenCVDetector {
+        +load(model_path: string, config: Config) : bool
+        +detect(images: vector<cv::Mat>) : vector<vector<Result2D>>
+        -net : cv::dnn::Net
+    }
+
+    struct Result2D {
+        +id: int
+        +class_id: int
+        +score: float
+        +bbox: cv::Rect
+    }
+
+    ' --- Warstwa Obliczeń 3D (niezależna od bibliotek ML) ---
+    class PositionEstimator {
+        +set_parameters(class_radii: map<int, float>)
+        +compute_3d(detection: Result2D, depth: cv::Mat, info: CameraModel) : Detection3D
+        
+        -sample_depth_from_region(...)
+        -estimate_from_radius(...)
+        -project_pixel_to_3d(...)
+    }
+    
+    struct Detection3D {
+        +result2d: Result2D
+        +position: geometry_msgs::Point
+        +header: std_msgs::Header
+    }
+
+    ' --- Warstwa Logiki Biznesowej i Śledzenia ---
+    class DetectionTracker {
+        +update(new_detections: vector<Detection3D>, tf_buffer: Buffer, target_frame: string) : vector<Detection3D>
+        
+        -transform_to_world(...)
+        -spatial_merge(detections)
+        -temporal_filter(detections)
+        
+        -history: map<int, DetectionGroup>
+    }
+
+    class DetectionGroup {
+        +add_measurement(det: Detection3D)
+        +is_confirmed() : bool
+        +get_state() : Detection3D
+        -measurements: deque<Detection3D>
     }
 }
 
-package "yolo_detect_impl" {
-    class NodeImpl {
-        {static} +quat_to_basis(q: np.ndarray) : np.ndarray
-        {static} +lookup_tf_as_matrix(tf_buffer: Buffer, target_frame: str, source_frame: str, time: Time) : np.ndarray
-        {static} +detection_array_from_yolo_results(node: Any, results: list[Any], headers: list[Any]) : Detection2DArray
-        {static} +add_3d_positions_to_detections(node: Any, detections: Detection2DArray, depth_images: list[Any], info_msgs: list[Any]) : Detection2DArray
-    }
-}
+' Relacje
+YoloDetectNode *-- IDetector
+YoloDetectNode *-- PositionEstimator
+YoloDetectNode *-- DetectionTracker
+YoloDetectNode *-- CameraContext : manages many
+CameraContext ..> CompressedSubscriberWrapper : uses for compressed
 
-YOLODetect *-- DetectionGroup : temporal_history
-YOLODetect ..> MsgUtils : uses
-YOLODetect ..> NodeImpl : uses
-MsgUtils ..> DetectionGroup : uses
+IDetector <|.. YoloOpenCVDetector
+IDetector ..> Result2D : produces
+
+PositionEstimator ..> Result2D : uses
+PositionEstimator ..> Detection3D : produces
+
+DetectionTracker *-- DetectionGroup
+DetectionTracker ..> Detection3D : processes
 
 @enduml
