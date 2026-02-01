@@ -1,3 +1,13 @@
+/**
+ * @file detection_tracker.hpp
+ * @author Mateusz Wójcik (mateuszwojcikv@gmail.com)
+ * @brief 
+ * @version 0.1
+ * @date 2026-02-01
+ * 
+ * @copyright Copyright (c) 2026
+ * 
+ */
 #pragma once
 
 #include <vector>

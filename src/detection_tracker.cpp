@@ -10,9 +10,6 @@ namespace yolo_ros {
 DetectionGroup::DetectionGroup(const Detection3D& initial_detection, int max_history_param) 
     : max_history_(max_history_param)
 {
-    // Generate simple ID if empty, but usually tracker manages IDs? 
-    // Python code: "if len(detection.id) == 0: detection.id = str(random...)"
-    // Here we can generate a UUID or static counter
     static int id_counter = 0;
     id_ = std::to_string(++id_counter); 
     
@@ -109,17 +106,13 @@ std::vector<Detection3D> DetectionTracker::transform_to_world(
              pose_in.pose.orientation.w = 1.0;
              
              // Timeout 0.0 because strictly we should have the TF by now or we use latest
-             tf_buffer->transform(pose_in, pose_out, target_frame, tf2::durationFromSec(0.0));
+             tf_buffer->transform(pose_in, pose_out, target_frame, tf2::durationFromSec(0.05));
              
              det_world.position = pose_out.pose.position;
              det_world.header = pose_out.header;
              output.push_back(det_world);
         } catch (const tf2::TransformException& ex) {
-            // Log?
-            // Fallback: keep original or discard?
-            // If we can't place it in world, we probably can't track it correctly vs others.
-            // But let's keep it to see *something*
-            output.push_back(det); 
+            continue;
         }
     }
     return output;
