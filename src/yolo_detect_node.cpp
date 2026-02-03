@@ -1,8 +1,14 @@
 #include "yolo_ros/yolo_detect_node.hpp"
 #include <cv_bridge/cv_bridge.hpp>
+#include <filesystem>
 
 namespace yolo_ros {
 
+/**
+ * @brief Construct a new Yolo Detect Node object
+ * 
+ * @param options Node options
+ */
 YoloDetectNode::YoloDetectNode(const rclcpp::NodeOptions & options)
     : rclcpp_lifecycle::LifecycleNode("yolo_detect", options)
 {
@@ -25,6 +31,12 @@ YoloDetectNode::YoloDetectNode(const rclcpp::NodeOptions & options)
     declare_parameter("debug_mode", false);
 }
 
+/**
+ * @brief Lifecycle on_configure callback
+ * 
+ * @param 
+ * @return CallbackReturn 
+ */
 YoloDetectNode::CallbackReturn YoloDetectNode::on_configure(const rclcpp_lifecycle::State &) {
     num_cameras_ = get_parameter("num_cameras").as_int();
     subscribe_depth_ = get_parameter("subscribe_depth").as_bool();
@@ -49,18 +61,17 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_configure(const rclcpp_lifecyc
     cfg.confidence_threshold = confidence_threshold_;
     cfg.class_names = class_names_;
     
-    if (!detector_->load(model_path_, "", cfg)) {
+    if (!detector_->load(model_path_, cfg)) {
         RCLCPP_ERROR(get_logger(), "Failed to load model: %s", model_path_.c_str());
         return CallbackReturn::FAILURE;
     }
 
     estimator_ = std::make_unique<PositionEstimator>();
     std::map<int, float> radii_map;
-    // Map array to map assuming index matching class_names
-    // Python: "class_names" and "class_radii" corresponding
-    for (size_t i=0; i < std::min(class_names_.size(), class_radii_param_.size()); i++) {
-        // If detector has ID mapping, we need to match it.
-        // Assuming user provides class names in same order as model classes (0,1,2...)
+    
+    // Map radii to class IDs ensuring bounds
+    size_t count = std::min(class_names_.size(), class_radii_param_.size());
+    for (size_t i = 0; i < count; ++i) {
         radii_map[i] = class_radii_param_[i];
     }
     estimator_->set_class_radii(radii_map);
@@ -77,11 +88,17 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_configure(const rclcpp_lifecyc
     return CallbackReturn::SUCCESS;
 }
 
+
+/**
+ * @brief Lifecycle on_activate callback
+ * 
+ * @param state 
+ * @return CallbackReturn 
+ */
 YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycle::State & state) {
     LifecycleNode::on_activate(state); // Activate publishers
 
     // Setup Subscribers & Sync
-    
     cameras_.clear();
     for (int i=0; i<num_cameras_; ++i) {
         auto cam = std::make_shared<CameraContext>();
@@ -151,6 +168,12 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycl
     return CallbackReturn::SUCCESS;
 }
 
+/**
+ * @brief Lifecycle on_deactivate callback
+ * 
+ * @param state 
+ * @return CallbackReturn 
+ */
 YoloDetectNode::CallbackReturn YoloDetectNode::on_deactivate(const rclcpp_lifecycle::State & state) {
     timer_.reset();
     cameras_.clear(); // Destroys subs
@@ -158,6 +181,12 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_deactivate(const rclcpp_lifecy
     return CallbackReturn::SUCCESS;
 }
 
+/**
+ * @brief Lifecycle on_cleanup callback
+ * 
+ * @param state 
+ * @return CallbackReturn 
+ */
 YoloDetectNode::CallbackReturn YoloDetectNode::on_cleanup(const rclcpp_lifecycle::State &) {
     detector_.reset();
     estimator_.reset();
@@ -168,10 +197,24 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_cleanup(const rclcpp_lifecycle
     return CallbackReturn::SUCCESS;
 }
 
+/**
+ * @brief Shutdown callback
+ * 
+ * @param state 
+ * @return YoloDetectNode::CallbackReturn 
+ */
 YoloDetectNode::CallbackReturn YoloDetectNode::on_shutdown(const rclcpp_lifecycle::State & state) {
     return CallbackReturn::SUCCESS;
 }
 
+/**
+ * @brief A callback for when camera data is received
+ * 
+ * @param color Color image from the camera
+ * @param depth Depth image from the camera
+ * @param info Camera info message
+ * @param camera_index Index of the camera
+ */
 void YoloDetectNode::on_camera_data(
     const sensor_msgs::msg::Image::ConstSharedPtr& color,
     const sensor_msgs::msg::Image::ConstSharedPtr& depth,
@@ -186,39 +229,75 @@ void YoloDetectNode::on_camera_data(
     cam->has_new_data = true;
 }
 
+/**
+ * @brief Timer callback to process data and publish detections
+ * 
+ */
 void YoloDetectNode::timer_callback() {
     // 1. Gather Images
     std::vector<cv::Mat> infer_batch;
     std::vector<int> infer_indices;
     
-    // We only process if we have new data? Or always?
-    // Python code: "if len(color_msgs) == 0 ... return"
+    if (!gather_images(infer_batch, infer_indices)) return;
+
+    // 2. Inference
+    auto results_batch = detector_->detect(infer_batch);
     
+    // 3. Process to 3D Detections
+    std::vector<Detection3D> all_detections_3d = process_detections(infer_batch, infer_indices, results_batch);
+    
+    // 4. Tracker & TF
+    auto final_detections = tracker_->process(all_detections_3d, tf_buffer_, world_frame_, get_clock()->now());
+    
+    // 5. Publish
+    if (!final_detections.empty()) {
+        publish_detections(final_detections);
+    }
+    
+    // 6. Annotated Images (Visualization)
+    if (publish_annotated_) {
+        publish_annotated_images(infer_batch, infer_indices, results_batch);
+    }
+}
+
+/**
+ * @brief Gather images from all cameras that have new data
+ * 
+ * @param images Vector to fill with gathered images
+ * @param indices Vector to fill with corresponding camera indices
+ * @return true if at least one image was gathered
+ * @return false otherwise
+ */
+bool YoloDetectNode::gather_images(std::vector<cv::Mat>& images, std::vector<int>& indices) {
     for (auto& cam : cameras_) {
         if (!cam->has_new_data || !cam->last_color) continue;
         
         // Convert to CV
         try {
            cv::Mat img = cv_bridge::toCvCopy(cam->last_color, "bgr8")->image;
-           infer_batch.push_back(img);
-           infer_indices.push_back(cam->index);
+           images.push_back(img);
+           indices.push_back(cam->index);
            cam->has_new_data = false; // Reset flag
         } catch (cv_bridge::Exception& e) {
            RCLCPP_ERROR(get_logger(), "cv_bridge exception: %s", e.what());
         }
     }
-    
-    if (infer_batch.empty()) return;
+    return !images.empty();
+}
 
-    // 2. Inference
-    // detect() returns vector<vector<Result2D>> (one vector per image)
-    auto results_batch = detector_->detect(infer_batch);
-    
+/**
+ * @brief Process detections from the detector and estimate their 3D positions
+ * 
+ * @param images Vector of input images
+ * @param indices Vector of corresponding camera indices
+ * @param results_batch Vector of detection results for each image
+ * @return std::vector<Detection3D> 
+*/
+std::vector<Detection3D> YoloDetectNode::process_detections(const std::vector<cv::Mat>& images, const std::vector<int>& indices, const std::vector<std::vector<Result2D>>& results_batch) {
     std::vector<Detection3D> all_detections_3d;
     
-    // 3. Process results
-    for (size_t i=0; i<infer_batch.size(); ++i) {
-        int cam_idx = infer_indices[i];
+    for (size_t i=0; i<images.size(); ++i) {
+        int cam_idx = indices[i];
         auto& cam_ctx = cameras_[cam_idx];
         auto& results = results_batch[i];
         
@@ -243,87 +322,90 @@ void YoloDetectNode::timer_callback() {
             all_detections_3d.push_back(d3d);
         }
     }
+    return all_detections_3d;
+}
+
+/**
+ * @brief Publish detections to ROS topic
+ * 
+ * @param detections Vector of 3D detections to publish
+ */
+void YoloDetectNode::publish_detections(const std::vector<Detection3D>& final_detections) {
+    vision_msgs::msg::Detection2DArray msg;
+    msg.header.stamp = get_clock()->now();
+    msg.header.frame_id = world_frame_;
     
-    // 4. Tracker & TF
-    auto final_detections = tracker_->process(all_detections_3d, tf_buffer_, world_frame_);
-    
-    // 5. Publish
-    if (!final_detections.empty()) {
-        vision_msgs::msg::Detection2DArray msg;
-        msg.header.stamp = get_clock()->now();
-        msg.header.frame_id = world_frame_;
+    for (const auto& d : final_detections) {
+        vision_msgs::msg::Detection2D ros_det;
+        ros_det.header = d.header; // Or world frame? Usually detections array is in world frame.
         
-        for (const auto& d : final_detections) {
-            vision_msgs::msg::Detection2D ros_det;
-            ros_det.header = d.header; // Or world frame? Usually detections array is in world frame.
-            
-            // Format vision_msgs
-            ros_det.bbox.center.position.x = d.result2d.bbox.x + d.result2d.bbox.width/2.0;
-            ros_det.bbox.center.position.y = d.result2d.bbox.y + d.result2d.bbox.height/2.0;
-            ros_det.bbox.size_x = d.result2d.bbox.width;
-            ros_det.bbox.size_y = d.result2d.bbox.height;
-            
-            vision_msgs::msg::ObjectHypothesisWithPose hyp;
-            hyp.hypothesis.class_id = std::to_string(d.result2d.class_id); // we used int, msg uses string often?
-            if (d.result2d.class_id < (int)class_names_.size()) {
-                hyp.hypothesis.class_id = class_names_[d.result2d.class_id];
-            } else {
-                hyp.hypothesis.class_id = std::to_string(d.result2d.class_id);
-            }
-            
-            hyp.hypothesis.score = d.result2d.score;
-            hyp.pose.pose.position = d.position; // The 3D position
-            hyp.pose.pose.orientation.w = 1.0;
-            
-            ros_det.results.push_back(hyp);
-            msg.detections.push_back(ros_det);
+        // Format vision_msgs
+        ros_det.bbox.center.position.x = d.result2d.bbox.x + d.result2d.bbox.width/2.0;
+        ros_det.bbox.center.position.y = d.result2d.bbox.y + d.result2d.bbox.height/2.0;
+        ros_det.bbox.size_x = d.result2d.bbox.width;
+        ros_det.bbox.size_y = d.result2d.bbox.height;
+        
+        vision_msgs::msg::ObjectHypothesisWithPose hyp;
+        hyp.hypothesis.class_id = std::to_string(d.result2d.class_id); // we used int, msg uses string often?
+        if (d.result2d.class_id < (int)class_names_.size()) {
+            hyp.hypothesis.class_id = class_names_[d.result2d.class_id];
+        } else {
+            hyp.hypothesis.class_id = std::to_string(d.result2d.class_id);
         }
         
-        detection_pub_->publish(msg);
+        hyp.hypothesis.score = d.result2d.score;
+        hyp.pose.pose.position = d.position; // The 3D position
+        hyp.pose.pose.orientation.w = 1.0;
+        
+        ros_det.results.push_back(hyp);
+        msg.detections.push_back(ros_det);
     }
     
-    // 6. Annotated Images (Visualization)
-    if (publish_annotated_) {
-        // We reiterate to find camera source for each image in batch
-        // Since we didn't store mapping of results->camera clearly except implied order,
-        // we need to be careful.
-        // The results_batch corresponds to infer_batch.
+    detection_pub_->publish(msg);
+}
+
+/**
+ * @brief Publish annotated images with detection results
+ * 
+ * @param images Vector of input images
+ * @param indices Vector of corresponding camera indices
+ * @param results_batch Vector of detection results for each image
+ */
+void YoloDetectNode::publish_annotated_images(const std::vector<cv::Mat>& images, const std::vector<int>& indices, const std::vector<std::vector<Result2D>>& results_batch) {
+    for (size_t i=0; i<images.size(); ++i) {
+        int cam_idx = indices[i];
+        auto& cam_ctx = cameras_[cam_idx];
         
-        for (size_t i=0; i<infer_batch.size(); ++i) {
-            int cam_idx = infer_indices[i];
-            auto& cam_ctx = cameras_[cam_idx];
+        // Draw
+        // We need a writable copy
+        cv::Mat annotated_img = images[i].clone();
+        const auto& results = results_batch[i];
+        
+        for (const auto& r : results) {
+            // Draw Box
+            cv::rectangle(annotated_img, r.bbox, cv::Scalar(0, 255, 0), 2);
             
-            // Draw
-            // We need a writable copy
-            cv::Mat annotated_img = infer_batch[i].clone();
-            const auto& results = results_batch[i];
-            
-            for (const auto& r : results) {
-                // Draw Box
-                cv::rectangle(annotated_img, r.bbox, cv::Scalar(0, 255, 0), 2);
-                
-                // Draw Label
-                std::string label = std::to_string(r.class_id);
-                if (r.class_id < (int)class_names_.size()) {
-                    label = class_names_[r.class_id];
-                }
-                label += " " + std::to_string((int)(r.score * 100)) + "%";
-                
-                int baseLine;
-                cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
-                cv::rectangle(annotated_img, cv::Point(r.bbox.x, r.bbox.y - labelSize.height),
-                              cv::Point(r.bbox.x + labelSize.width, r.bbox.y + baseLine),
-                              cv::Scalar(0, 255, 0), cv::FILLED);
-                cv::putText(annotated_img, label, cv::Point(r.bbox.x, r.bbox.y),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+            // Draw Label
+            std::string label = std::to_string(r.class_id);
+            if (r.class_id < (int)class_names_.size()) {
+                label = class_names_[r.class_id];
             }
+            label += " " + std::to_string((int)(r.score * 100)) + "%";
             
-            // Publish
-            if (cam_ctx->annotated_pub && cam_ctx->annotated_pub->get_subscription_count() > 0) {
-                 sensor_msgs::msg::Image::SharedPtr out_msg = cv_bridge::CvImage(
-                     cam_ctx->last_color->header, "bgr8", annotated_img).toImageMsg();
-                 cam_ctx->annotated_pub->publish(*out_msg);
-            }
+            int baseLine;
+            cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
+            cv::rectangle(annotated_img, cv::Point(r.bbox.x, r.bbox.y - labelSize.height),
+                          cv::Point(r.bbox.x + labelSize.width, r.bbox.y + baseLine),
+                          cv::Scalar(0, 255, 0), cv::FILLED);
+            cv::putText(annotated_img, label, cv::Point(r.bbox.x, r.bbox.y),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+        }
+        
+        // Publish
+        if (cam_ctx->annotated_pub && cam_ctx->annotated_pub->get_subscription_count() > 0) {
+             sensor_msgs::msg::Image::SharedPtr out_msg = cv_bridge::CvImage(
+                 cam_ctx->last_color->header, "bgr8", annotated_img).toImageMsg();
+             cam_ctx->annotated_pub->publish(*out_msg);
         }
     }
 }

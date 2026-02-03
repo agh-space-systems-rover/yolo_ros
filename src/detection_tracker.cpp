@@ -7,37 +7,60 @@
 
 namespace yolo_ros {
 
-DetectionGroup::DetectionGroup(const Detection3D& initial_detection, int max_history_param) 
-    : max_history_(max_history_param)
+/**
+ * @brief Construct a new Detection Group:: Detection Group object
+ * 
+ * @param initial_detection 
+ * @param max_history_param 
+ */
+DetectionGroup::DetectionGroup(const std::string& id, const Detection3D& initial_detection, int max_history_param) 
+    : id_(id), max_history_(max_history_param)
 {
-    static int id_counter = 0;
-    id_ = std::to_string(++id_counter); 
-    
     add_measurement(initial_detection);
 }
 
+/**
+ * @brief Convert a new detection measurement into the group.
+ * 
+ * @param det 
+ */
 void DetectionGroup::add_measurement(const Detection3D& det) {
     measurements_.push_back(det);
     if (measurements_.size() > (size_t)max_history_) {
         measurements_.pop_front();
     }
-    last_update_ = rclcpp::Clock().now();
+    last_update_ = det.header.stamp;
 }
 
+/**
+ * @brief Check if the detection group is confirmed based on the number of measurements.
+ * 
+ * @param temporal_threshold 
+ * @return true 
+ * @return false 
+ */
 bool DetectionGroup::is_confirmed(int temporal_threshold) const {
     return (int)measurements_.size() >= temporal_threshold;
 }
 
+/**
+ * @brief Check if the detection group is stale based on the last update time.
+ * 
+ * @param current_time Current time for comparison.
+ * @param max_age_seconds Maximum allowed age in seconds before considered stale.
+ * @return true If the detection group is stale.
+ * @return false If the detection group is not stale.
+ */
 bool DetectionGroup::is_stale(const rclcpp::Time& current_time, double max_age_seconds) const {
-    // Implementing staleness check
-    try {
-        double seconds = (current_time - last_update_).seconds();
-        return seconds > max_age_seconds;
-    } catch (...) {
-        return true; 
-    }
+    double seconds = (current_time - last_update_).seconds();
+    return seconds > max_age_seconds;
 }
 
+/**
+ * @brief Calculate the average detection from the history of measurements.
+ * 
+ * @return Detection3D 
+ */
 Detection3D DetectionGroup::get_average_detection() const {
     if (measurements_.empty()) return Detection3D();
 
@@ -62,10 +85,25 @@ Detection3D DetectionGroup::get_average_detection() const {
 
 // -----------------------------------------------------------------------------
 
+/**
+ * @brief Construct a new Detection Tracker:: Detection Tracker object
+ * 
+ * @param merge_radius radius for spatial merging
+ * @param temporal_window 
+ * @param temporal_threshold 
+ */
 DetectionTracker::DetectionTracker(float merge_radius, int temporal_window, int temporal_threshold)
     : merge_radius_(merge_radius), temporal_window_(temporal_window), temporal_threshold_(temporal_threshold)
 {}
 
+
+/**
+ * @brief Calculate the Euclidean distance between two 3D points.
+ * 
+ * @param p1 First 3D point.
+ * @param p2 Second 3D point.
+ * @return float Euclidean distance between p1 and p2.
+ */
 float DetectionTracker::dist3d(const geometry_msgs::msg::Point& p1, const geometry_msgs::msg::Point& p2) {
     float dx = p1.x - p2.x;
     float dy = p1.y - p2.y;
@@ -73,10 +111,19 @@ float DetectionTracker::dist3d(const geometry_msgs::msg::Point& p1, const geomet
     return std::sqrt(dx*dx + dy*dy + dz*dz);
 }
 
+/**
+ * @brief Process new detections: transform, merge, and track.
+ * 
+ * @param new_detections vector of new 3D detections
+ * @param tf_buffer TF2 buffer for transformations
+ * @param target_frame Target frame to transform detections into
+ * @return std::vector<Detection3D> 
+ */
 std::vector<Detection3D> DetectionTracker::process(
     const std::vector<Detection3D>& new_detections, 
     const std::shared_ptr<tf2_ros::Buffer>& tf_buffer,
-    const std::string& target_frame
+    const std::string& target_frame,
+    const rclcpp::Time& current_time
 ) {
     // 1. Transform all incoming to World Frame
     auto world_detections = transform_to_world(new_detections, tf_buffer, target_frame);
@@ -85,9 +132,17 @@ std::vector<Detection3D> DetectionTracker::process(
     auto merged = spatial_merge(world_detections);
     
     // 3. Temporal Filter (Tracker Logic)
-    return temporal_filter(merged);
+    return temporal_filter(merged, current_time);
 }
 
+/**
+ * @brief Transform detections to the target world frame using TF2.
+ * 
+ * @param dets Vector of 3D detections.
+ * @param tf_buffer TF2 buffer for transformations.
+ * @param target_frame Target frame to transform detections into.
+ * @return std::vector<Detection3D> 
+ */
 std::vector<Detection3D> DetectionTracker::transform_to_world(
     const std::vector<Detection3D>& dets,
     const std::shared_ptr<tf2_ros::Buffer>& tf_buffer, 
@@ -118,6 +173,13 @@ std::vector<Detection3D> DetectionTracker::transform_to_world(
     return output;
 }
 
+
+/**
+ * @brief Spatially merge detections that are close together and of the same class.
+ * 
+ * @param dets Vector of 3D detections.
+ * @return std::vector<Detection3D> 
+ */
 std::vector<Detection3D> DetectionTracker::spatial_merge(const std::vector<Detection3D>& dets) {
     // Simple greedy clustering
     // If Det A and Det B are close (< radius) and same class -> merge
@@ -169,7 +231,13 @@ std::vector<Detection3D> DetectionTracker::spatial_merge(const std::vector<Detec
     return merged;
 }
 
-std::vector<Detection3D> DetectionTracker::temporal_filter(const std::vector<Detection3D>& dets) {
+/**
+ * @brief Apply temporal filtering to a set of 3D detections to track objects over time.
+ * 
+ * @param dets Vector of current 3D detections.
+ * @return std::vector<Detection3D> Filtered and tracked 3D detections.
+ */
+std::vector<Detection3D> DetectionTracker::temporal_filter(const std::vector<Detection3D>& dets, const rclcpp::Time& current_time) {
     // Data Assocation: Nearest Neighbor
     // Update existing groups
     // Create new groups
@@ -207,7 +275,8 @@ std::vector<Detection3D> DetectionTracker::temporal_filter(const std::vector<Det
     // 2. Create new tracks
     for (size_t i = 0; i < dets.size(); ++i) {
         if (!matched[i]) {
-            DetectionGroup new_group(dets[i], temporal_window_);
+            std::string new_id = std::to_string(next_id_++);
+            DetectionGroup new_group(new_id, dets[i], temporal_window_);
             history_.insert({new_group.get_id(), new_group});
         }
     }
@@ -218,7 +287,7 @@ std::vector<Detection3D> DetectionTracker::temporal_filter(const std::vector<Det
     auto it = history_.begin();
     while (it != history_.end()) {
         // Remove if stale (e.g. 1 second no update)
-        if (it->second.is_stale(rclcpp::Clock().now(), 1.0)) {
+        if (it->second.is_stale(current_time, 1.0)) {
             it = history_.erase(it);
         } else {
             if (it->second.is_confirmed(temporal_threshold_)) {

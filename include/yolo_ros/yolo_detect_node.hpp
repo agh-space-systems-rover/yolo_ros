@@ -2,7 +2,7 @@
  * @file yolo_detect_node.hpp
  * @author Mateusz Wójcik (mateuszwojcikv@gmail.com)
  * @brief Header for YOLO Detect Node for Kalman ROS2 Package
- * @version 0.1
+ * @version 0.1.0
  * @date 2026-01-20
  * 
  * @copyright Copyright (c) 2026
@@ -31,24 +31,34 @@
 
 namespace yolo_ros {
 
-    // Helper to handle CompressedImage -> Image adaption for message_filters
+    /**
+     * @brief Helper class to wrap CompressedImage subscription into SimpleFilter interface
+     * 
+     */
     class CompressedSubscriberWrapper : public message_filters::SimpleFilter<sensor_msgs::msg::Image>
     {
     public:
+        /**
+         * @brief Construct a new Compressed Subscriber Wrapper object
+         * 
+         * @param node Pointer to the lifecycle node
+         * @param topic Topic to subscribe to
+         * @param qos Quality of Service profile
+         */
         CompressedSubscriberWrapper(rclcpp_lifecycle::LifecycleNode* node, const std::string& topic, const rmw_qos_profile_t& qos)
         {
             sub_ = node->create_subscription<sensor_msgs::msg::CompressedImage>(
                 topic, 
                 rclcpp::QoS(rclcpp::QoSInitialization::from_rmw(qos), qos),
                 [this](const sensor_msgs::msg::CompressedImage::SharedPtr msg) {
-                    // Decode
+                    // Decode compressed image to raw cv::Mat
                     cv_bridge::CvImagePtr cv_ptr;
                     try {
                         cv_ptr = cv_bridge::toCvCopy(msg, "bgr8");
                     } catch (cv_bridge::Exception& e) {
                         return;
                     }
-                    // Signal
+                    // Signal the filter chain with the raw image message
                     this->signalMessage(cv_ptr->toImageMsg());
                 }
             );
@@ -139,6 +149,14 @@ namespace yolo_ros {
         std::vector<std::shared_ptr<CameraContext>> cameras_;
         rclcpp::TimerBase::SharedPtr timer_;
 
+        /**
+         * @brief A callback for when camera data is received
+         * 
+         * @param color Color image from the camera
+         * @param depth Depth image from the camera
+         * @param info Camera info message
+         * @param camera_index Index of the camera
+         */
         void on_camera_data(
             const sensor_msgs::msg::Image::ConstSharedPtr& color,
             const sensor_msgs::msg::Image::ConstSharedPtr& depth,
@@ -146,7 +164,47 @@ namespace yolo_ros {
             int camera_index
         );
 
+        /**
+         * @brief A callback for timer events to process and publish detections
+         * 
+         */
         void timer_callback();
+
+        /**
+         * @brief Gather images from all cameras that have new data
+         * 
+         * @param images Vector to fill with gathered images
+         * @param indices Vector to fill with corresponding camera indices
+         * @return true if at least one image was gathered
+         * @return false otherwise
+         */
+        bool gather_images(std::vector<cv::Mat>& images, std::vector<int>& indices);
+        
+        /**
+         * @brief Process detections from the detector and estimate their 3D positions
+         * 
+         * @param images Vector of input images
+         * @param indices Vector of corresponding camera indices
+         * @param results_batch Vector of detection results for each image
+         * @return std::vector<Detection3D> 
+         */
+        std::vector<Detection3D> process_detections(const std::vector<cv::Mat>& images, const std::vector<int>& indices, const std::vector<std::vector<Result2D>>& results_batch);
+        
+        /**
+         * @brief Publish detections to ROS topic
+         * 
+         * @param detections Vector of 3D detections to publish
+         */
+        void publish_detections(const std::vector<Detection3D>& detections);
+        
+        /**
+         * @brief Publish annotated images with detection results
+         * 
+         * @param images Vector of input images
+         * @param indices Vector of corresponding camera indices
+         * @param results_batch Vector of detection results for each image
+         */
+        void publish_annotated_images(const std::vector<cv::Mat>& images, const std::vector<int>& indices, const std::vector<std::vector<Result2D>>& results_batch);
     };
 
 } // namespace yolo_ros

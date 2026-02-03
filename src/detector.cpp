@@ -2,7 +2,7 @@
  * @file detector.cpp
  * @author Mateusz Wójcik (mateuszwojcikv@gmail.com)
  * @brief Declaration of YOLO Object Detector using OpenCV DNN module
- * @version 0.1
+ * @version 0.1.0
  * @date 2026-02-01
  * 
  * @copyright Copyright (c) 2026
@@ -12,8 +12,6 @@
 #include <fstream>
 #include <iostream>
 
-const int INPUT_WIDTH = 640;
-const int INPUT_HEIGHT = 640;
 const int MAX_UINT8 = 255;
 
 
@@ -21,14 +19,13 @@ namespace yolo_ros {
 
 /**
  * @brief Load the YOLO model
+
  * 
- * @param model_path path to the model file
- * @param classes_path path to the classes file
  * @param config model configuration parameters
  * @return true if the model was loaded successfully
  * @return false otherwise
  */
-bool YoloOpenCVDetector::load(const std::string& model_path, const std::string& classes_path, const ModelConfig& config) {
+bool YoloOpenCVDetector::load(const std::string& model_path, const ModelConfig& config) {
     config_ = config;
     try {
         net_ = cv::dnn::readNet(model_path);
@@ -45,14 +42,20 @@ bool YoloOpenCVDetector::load(const std::string& model_path, const std::string& 
 #endif
         
         out_names_ = net_.getUnconnectedOutLayersNames();
-        
-        // If classes are not provided in config, try to load from file
-        if (config_.class_names.empty() && !classes_path.empty()) {
-             std::ifstream ifs(classes_path.c_str());
-             std::string line;
-             while (std::getline(ifs, line)) {
-                 if (!line.empty()) config_.class_names.push_back(line);
-             }
+
+        // Try to detect input size from the model (works for ONNX with fixed shapes)
+        std::vector<cv::MatShape> inLayerShapes, outLayerShapes;
+        // Layer 0 is usually the input layer
+        net_.getLayerShapes(cv::MatShape(), 0, inLayerShapes, outLayerShapes);
+        if (!inLayerShapes.empty() && !inLayerShapes[0].empty()) {
+            // Usually [Batch, Channels, Height, Width]
+            if (inLayerShapes[0].size() == 4) {
+                input_h_ = inLayerShapes[0][2];
+                input_w_ = inLayerShapes[0][3];
+                 std::cout << "YoloOpenCVDetector: Autodetected input size: " << input_w_ << "x" << input_h_ << std::endl;
+            }
+        } else {
+             std::cout << "YoloOpenCVDetector: Using default input size: " << input_w_ << "x" << input_h_ << std::endl;
         }
         
         return !net_.empty();
@@ -107,14 +110,27 @@ std::vector<std::vector<Result2D>> YoloOpenCVDetector::detect(const std::vector<
     return all_results;
 }
 
+/**
+ * @brief Preprocess the input image for YOLO model
+ * 
+ * @param img 
+ * @return cv::Mat 
+ */
 cv::Mat YoloOpenCVDetector::preprocess(const cv::Mat& img) {
     cv::Mat blob;
-    cv::Size input_size(INPUT_WIDTH, INPUT_HEIGHT);
+    cv::Size input_size(input_w_, input_h_);
     // YOLOv11/v8 standard: 1/255 scaling, swapRB=true, crop=false
     cv::dnn::blobFromImage(img, blob, 1.0/MAX_UINT8, input_size, cv::Scalar(), true, false);
     return blob;
 }
 
+/**
+ * @brief Postprocess the raw prediction from YOLO model
+ * 
+ * @param raw_prediction Raw output from the YOLO network
+ * @param img_size Size of the original input image
+ * @return std::vector<Result2D> 
+ */
 std::vector<Result2D> YoloOpenCVDetector::postprocess(const cv::Mat& raw_prediction, const cv::Size& img_size) {
     // 1. Transpose to ensure [Anchors, Channels] format
     cv::Mat prediction = sanitize_prediction_shape(raw_prediction);
@@ -130,6 +146,17 @@ std::vector<Result2D> YoloOpenCVDetector::postprocess(const cv::Mat& raw_predict
     return apply_nms_and_format(boxes, confidences, class_ids);
 }
 
+/**
+ * @brief Scale YOLO coordinates back to original image size
+ * 
+ * @param cx Center x coordinate in YOLO input scale
+ * @param cy Center y coordinate in YOLO input scale
+ * @param w Width in YOLO input scale
+ * @param h Height in YOLO input scale
+ * @param x_factor Scaling factor for x dimension
+ * @param y_factor Scaling factor for y dimension
+ * @return cv::Rect 
+ */
 cv::Rect YoloOpenCVDetector::scale_coords(float cx, float cy, float w, float h, float x_factor, float y_factor) {
     int left = int((cx - 0.5 * w) * x_factor);
     int top = int((cy - 0.5 * h) * y_factor);
@@ -138,6 +165,12 @@ cv::Rect YoloOpenCVDetector::scale_coords(float cx, float cy, float w, float h, 
     return cv::Rect(left, top, width, height);
 }
 
+/**
+ * @brief Sanitize the shape of the raw prediction matrix to ensure consistent format
+ * 
+ * @param raw Raw output from the YOLO network
+ * @return cv::Mat 
+ */
 cv::Mat YoloOpenCVDetector::sanitize_prediction_shape(const cv::Mat& raw) {
     cv::Mat dst;
     if (raw.dims == 3 && raw.size[0] == 1) {
@@ -153,6 +186,15 @@ cv::Mat YoloOpenCVDetector::sanitize_prediction_shape(const cv::Mat& raw) {
     return dst;
 }
 
+/**
+ * @brief Extract detections from the sanitized prediction matrix
+ * 
+ * @param prediction 
+ * @param img_size 
+ * @param boxes 
+ * @param confidences 
+ * @param class_ids 
+ */
 void YoloOpenCVDetector::extract_detections(const cv::Mat& prediction, const cv::Size& img_size, 
                         std::vector<cv::Rect>& boxes, 
                         std::vector<float>& confidences, 
@@ -163,8 +205,8 @@ void YoloOpenCVDetector::extract_detections(const cv::Mat& prediction, const cv:
     int num_classes = num_channels - 4; // x, y, w, h are first 4
 
     // Scaling factors to map network input (640x640) back to input image size
-    float x_factor = (float)img_size.width / INPUT_WIDTH;
-    float y_factor = (float)img_size.height / INPUT_HEIGHT;
+    float x_factor = (float)img_size.width / input_w_;
+    float y_factor = (float)img_size.height / input_h_;
 
     for (int i = 0; i < num_anchors; i++) {
         const float* row_ptr = prediction.ptr<float>(i);
@@ -187,6 +229,14 @@ void YoloOpenCVDetector::extract_detections(const cv::Mat& prediction, const cv:
     }
 }
 
+/**
+ * @brief Apply Non-Maximum Suppression and format the final detection results
+ * 
+ * @param boxes 
+ * @param confidences 
+ * @param class_ids 
+ * @return std::vector<Result2D> 
+ */
 std::vector<Result2D> YoloOpenCVDetector::apply_nms_and_format(const std::vector<cv::Rect>& boxes, 
                                             const std::vector<float>& confidences, 
                                             const std::vector<int>& class_ids) {

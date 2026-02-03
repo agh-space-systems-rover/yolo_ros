@@ -57,12 +57,11 @@ namespace yolo_ros {
          * @brief Load the model
          * 
          * @param model_path path to the model file
-         * @param classes_path path to the classes file
          * @param config model configuration parameters
          * @return true if the model was loaded successfully
          * @return false otherwise
          */
-        virtual bool load(const std::string& model_path, const std::string& classes_path, const ModelConfig& config) = 0;
+        virtual bool load(const std::string& model_path, const ModelConfig& config) = 0;
 
         /**
          * @brief Perform detection on a batch of images
@@ -84,12 +83,11 @@ namespace yolo_ros {
          * @brief Load the YOLO model
          * 
          * @param model_path path to the model file
-         * @param classes_path path to the classes file
          * @param config model configuration parameters
          * @return true if the model was loaded successfully
          * @return false otherwise
          */
-        bool load(const std::string& model_path, const std::string& classes_path, const ModelConfig& config) override;
+        bool load(const std::string& model_path, const ModelConfig& config) override;
         
         /**
          * @brief Perform detection on a batch of images
@@ -103,6 +101,10 @@ namespace yolo_ros {
         cv::dnn::Net net_;
         ModelConfig config_;
         std::vector<std::string> out_names_;
+        
+        // Input dimensions
+        int input_w_ = 640;
+        int input_h_ = 640;
 
         cv::Mat preprocess(const cv::Mat& img);
         std::vector<Result2D> postprocess(const cv::Mat& prediction, const cv::Size& img_size);

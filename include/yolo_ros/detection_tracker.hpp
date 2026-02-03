@@ -24,7 +24,8 @@ namespace yolo_ros {
 
     class DetectionGroup {
     public:
-        DetectionGroup(const Detection3D& initial_detection, int max_history_param);
+        DetectionGroup() = default;
+        DetectionGroup(const std::string& id, const Detection3D& initial_detection, int max_history_param);
         void add_measurement(const Detection3D& det);
         bool is_confirmed(int temporal_threshold) const;
         bool is_stale(const rclcpp::Time& current_time, double max_age_seconds) const;
@@ -45,13 +46,15 @@ namespace yolo_ros {
         std::vector<Detection3D> process(
             const std::vector<Detection3D>& new_detections, 
             const std::shared_ptr<tf2_ros::Buffer>& tf_buffer,
-            const std::string& target_frame
+            const std::string& target_frame,
+            const rclcpp::Time& current_time
         );
 
     private:
         float merge_radius_;
         int temporal_window_;
         int temporal_threshold_;
+        int next_id_ = 1;
 
         std::map<std::string, DetectionGroup> history_; // ID -> Group
 
@@ -62,7 +65,7 @@ namespace yolo_ros {
              const std::string& target_frame
         );
         std::vector<Detection3D> spatial_merge(const std::vector<Detection3D>& dets);
-        std::vector<Detection3D> temporal_filter(const std::vector<Detection3D>& dets);
+        std::vector<Detection3D> temporal_filter(const std::vector<Detection3D>& dets, const rclcpp::Time& current_time);
         
         static float dist3d(const geometry_msgs::msg::Point& p1, const geometry_msgs::msg::Point& p2);
     };
