@@ -1,5 +1,5 @@
 #include "yolo_ros/yolo_detect_node.hpp"
-#include <cv_bridge/cv_bridge.hpp>
+#include <cv_bridge/cv_bridge.h>
 #include <filesystem>
 
 namespace yolo_ros {

@@ -23,7 +23,7 @@
 #include <message_filters/simple_filter.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
-#include <cv_bridge/cv_bridge.hpp>
+#include <cv_bridge/cv_bridge.h>
 
 #include "yolo_ros/detector.hpp"
 #include "yolo_ros/position_estimator.hpp"

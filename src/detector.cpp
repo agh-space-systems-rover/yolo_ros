@@ -44,9 +44,9 @@ bool YoloOpenCVDetector::load(const std::string& model_path, const ModelConfig& 
         out_names_ = net_.getUnconnectedOutLayersNames();
 
         // Try to detect input size from the model (works for ONNX with fixed shapes)
-        std::vector<cv::MatShape> inLayerShapes, outLayerShapes;
+        std::vector<cv::dnn::MatShape> inLayerShapes, outLayerShapes;
         // Layer 0 is usually the input layer
-        net_.getLayerShapes(cv::MatShape(), 0, inLayerShapes, outLayerShapes);
+        net_.getLayerShapes(cv::dnn::MatShape(), 0, inLayerShapes, outLayerShapes);
         if (!inLayerShapes.empty() && !inLayerShapes[0].empty()) {
             // Usually [Batch, Channels, Height, Width]
             if (inLayerShapes[0].size() == 4) {

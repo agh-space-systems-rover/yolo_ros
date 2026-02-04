@@ -30,6 +30,7 @@ namespace yolo_ros {
      * 
      */
     struct Detection3D {
+        
         Result2D result2d;
         geometry_msgs::msg::Point position;
         std_msgs::msg::Header header;
