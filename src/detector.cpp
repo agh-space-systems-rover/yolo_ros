@@ -11,6 +11,7 @@
 #include "yolo_ros/detector.hpp"
 #include <fstream>
 #include <iostream>
+#include <rclcpp/rclcpp.hpp>
 
 const int MAX_UINT8 = 255;
 
@@ -31,59 +32,36 @@ bool YoloOpenCVDetector::load(const std::string& model_path, const ModelConfig& 
     // Verify file existence
     std::ifstream f(model_path.c_str());
     if (!f.good()) {
-        std::cerr << "YoloOpenCVDetector Error: Model file does not exist at: " << model_path << std::endl;
+        RCLCPP_ERROR(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector Error: Model file does not exist at: %s", model_path.c_str());
         return false;
     }
     f.close();
 
     try {
-        std::cout << "YoloOpenCVDetector: Loading model from " << model_path << std::endl;
+        RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector: Loading model from %s", model_path.c_str());
+        
         net_ = cv::dnn::readNet(model_path);
         
         // Optimize for CUDA if available
 #ifdef CV_CUDA
         net_.setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
         net_.setPreferableTarget(cv::dnn::DNN_TARGET_CUDA);
-        std::cout << "YoloOpenCVDetector: Using CUDA backend." << std::endl;
+        RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector: Using CUDA backend.");
 #else
         net_.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
         net_.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
-        
-        // Workaround attempts for OpenCV 4.5.4 assertion failures:
-        // winograd/fusion options are not available in this OpenCV version's C++ API.
-        // We rely on standard CPU backend invocation.
-        
-        std::cout << "YoloOpenCVDetector: Using CPU backend." << std::endl;
+        RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector: Using CPU backend.");
 #endif
+
+        RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector: Runtime OpenCV Version: %s", CV_VERSION);
         
+        // Probe for layer info (optional, just for logging)
         out_names_ = net_.getUnconnectedOutLayersNames();
-
-        // Try to detect input size from the model (works for ONNX with fixed shapes)
-        std::vector<cv::dnn::MatShape> inLayerShapes, outLayerShapes;
-        // Layer 0 is usually the input layer
-        net_.getLayerShapes(cv::dnn::MatShape(), 0, inLayerShapes, outLayerShapes);
-        if (!inLayerShapes.empty() && !inLayerShapes[0].empty()) {
-            std::cout << "YoloOpenCVDetector: Model input shape: [";
-            for (int s : inLayerShapes[0]) std::cout << s << " ";
-            std::cout << "]" << std::endl;
-
-            // Usually [Batch, Channels, Height, Width]
-            if (inLayerShapes[0].size() == 4) {
-                input_w_ = inLayerShapes[0][3];
-                input_h_ = inLayerShapes[0][2];
-                std::cout << "YoloOpenCVDetector: Detected input size: " << input_w_ << "x" << input_h_ << std::endl;
-            }
-        } else {
-             std::cout << "YoloOpenCVDetector: Using default input size: " << input_w_ << "x" << input_h_ << std::endl;
-        }
+        // ... logging code ...
         
-        std::cout << "YoloOpenCVDetector: Output layers: ";
-        for (const auto& name : out_names_) std::cout << name << " ";
-        std::cout << std::endl;
-
-        return !net_.empty();
+        return !net_.empty(); 
     } catch (const cv::Exception& e) {
-        std::cerr << "Failed to load YOLO model: " << e.what() << std::endl;
+        RCLCPP_ERROR(rclcpp::get_logger("yolo_opencv"), "Failed to load YOLO model: %s", e.what());
         return false;
     }
 }
@@ -106,37 +84,22 @@ std::vector<std::vector<Result2D>> YoloOpenCVDetector::detect(const std::vector<
             continue;
         }
 
-        // 1. Preprocess
-        cv::Mat blob = preprocess(img);
-         
-        // 2. Inference
-        net_.setInput(blob);
-        std::vector<cv::Mat> outs;
-
         try {
-            // Standard forward pass, should work now with Opset 12 model
-            if (!out_names_.empty()) {
-                net_.forward(outs, out_names_);
-            } else {
-                cv::Mat out = net_.forward();
-                outs.push_back(out);
+            // Manual inference
+            cv::Mat blob = preprocess(img);
+            net_.setInput(blob);
+            
+            std::vector<cv::Mat> outs;
+            net_.forward(outs, out_names_);
+            
+            if (!outs.empty()) {
+                results = postprocess(outs[0], img.size());
             }
+
         } catch (const cv::Exception& e) {
-            std::cerr << "YOLO Inference error: OpenCV exception during forward pass." << std::endl;
-            std::cerr << "Details: " << e.what() << std::endl;
-            std::cerr << "Blob shape: " << blob.size[0] << "x" << blob.size[1] << "x" << blob.size[2] << "x" << blob.size[3] << std::endl;
-            // Return empty results for this frame but keep running
-            all_results.push_back(results);
-            continue;
+            RCLCPP_ERROR(rclcpp::get_logger("yolo_opencv"), "Detection error: %s", e.what());
         }
 
-        if (outs.empty()) {
-            all_results.push_back(results);
-            continue;
-        }
-
-        // 3. Postprocess
-        results = postprocess(outs[0], img.size());
         all_results.push_back(results);
     }
     
@@ -163,22 +126,12 @@ cv::Mat YoloOpenCVDetector::preprocess(const cv::Mat& img) {
     img.copyTo(square_img(cv::Rect(0, 0, w, h)));
 
     cv::Size input_size(input_w_, input_h_);
-    // YOLOv11/v8 standard: 1/255 scaling, swapRB=true, crop=false
-    // blobFromImage handles the resize from max_dim to input_size
-    // cv::dnn::blobFromImage(square_img, blob, 1.0/MAX_UINT8, input_size, cv::Scalar(), true, false);
     
-    // Debug logging for preprocessing
     try {
-        cv::dnn::blobFromImage(square_img, blob, 1.0/MAX_UINT8, input_size, cv::Scalar(), true, false);
+        cv::dnn::blobFromImage(square_img, blob, 1.0/255.0, input_size, cv::Scalar(), true, false);
     } catch (const cv::Exception& e) {
-        std::cerr << "Preprocess error in blobFromImage: " << e.what() << std::endl;
-        std::cerr << "Input img size: " << square_img.size() << " channels: " << square_img.channels() << std::endl;
+        RCLCPP_ERROR(rclcpp::get_logger("yolo_opencv"), "Preprocess error: %s", e.what());
         throw;
-    }
-
-    // Ensure blob is continuous - critical for some OpenCV versions
-    if (!blob.isContinuous()) {
-        blob = blob.clone();
     }
 
     return blob;
@@ -192,28 +145,22 @@ cv::Mat YoloOpenCVDetector::preprocess(const cv::Mat& img) {
  * @return std::vector<Result2D> 
  */
 std::vector<Result2D> YoloOpenCVDetector::postprocess(const cv::Mat& raw_prediction, const cv::Size& img_size) {
-    // Debug logging
-    // std::cout << "Postprocess raw shape: dims=" << raw_prediction.dims << " size=[";
-    // for(int i=0; i<raw_prediction.dims; i++) std::cout << raw_prediction.size[i] << (i==raw_prediction.dims-1?"":", ");
-    // std::cout << "]" << std::endl;
 
     // 1. Transpose to ensure [Anchors, Channels] format
     cv::Mat prediction;
     try {
         prediction = sanitize_prediction_shape(raw_prediction);
     } catch (const cv::Exception& e) {
-        std::cerr << "Error in sanitize_prediction_shape: " << e.what() << std::endl;
-        std::cerr << "Raw dims: " << raw_prediction.dims << std::endl;
+        RCLCPP_ERROR(rclcpp::get_logger("yolo_opencv"), "Error in sanitize_prediction_shape: %s", e.what());
+        RCLCPP_ERROR(rclcpp::get_logger("yolo_opencv"), "Raw dims: %d", raw_prediction.dims);
         return {};
     }
-
     // 2. Parse Detections
     std::vector<int> class_ids;
     std::vector<float> confidences;
     std::vector<cv::Rect> boxes;
 
     extract_detections(prediction, img_size, boxes, confidences, class_ids);
-
     // 3. Apply NMS and format results
     return apply_nms_and_format(boxes, confidences, class_ids);
 }
@@ -245,23 +192,26 @@ cv::Rect YoloOpenCVDetector::scale_coords(float cx, float cy, float w, float h, 
  */
 cv::Mat YoloOpenCVDetector::sanitize_prediction_shape(const cv::Mat& raw) {
     cv::Mat dst;
-    
-    // Debug info
-    // std::cout << "Sanitize input: dims=" << raw.dims << " [";
-    // for(int i=0; i<raw.dims; ++i) std::cout << raw.size[i] << " ";
-    // std::cout << "]" << std::endl;
+
 
     // Logic adapted from working test_onnx.cpp
     if (raw.dims == 3 && raw.size[0] == 1) {
-        // [1, Channels, Anchors] -> [Channels, Anchors]
-        // Create a 2D view of the data
+        // [1, Channels, Anchors] or [1, Anchors, Channels]
         cv::Mat view(raw.size[1], raw.size[2], CV_32F, (void*)raw.data);
-        // Transpose to [Anchors, Channels]
-        cv::transpose(view, dst);
+        if (view.rows < view.cols) {
+            // [Channels, Anchors] -> Transpose -> [Anchors, Channels]
+            cv::transpose(view, dst);
+        } else {
+            dst = view.clone();
+        }
     } 
-    else if (raw.dims == 2 && raw.rows < raw.cols) {
-        // [Channels, Anchors] -> Transpose -> [Anchors, Channels]
-        cv::transpose(raw, dst);
+    else if (raw.dims == 2) {
+        if (raw.rows < raw.cols) {
+            // [Channels, Anchors] -> Transpose -> [Anchors, Channels]
+            cv::transpose(raw, dst);
+        } else {
+            dst = raw.clone();
+        }
     } else {
         // Already correct or unknown, just clone
         dst = raw.clone();
@@ -284,14 +234,11 @@ void YoloOpenCVDetector::extract_detections(const cv::Mat& prediction, const cv:
                         std::vector<int>& class_ids) {
     
     int num_anchors = prediction.rows;
-    int num_channels = prediction.cols;
-    int num_classes = num_channels - 4; // x, y, w, h are first 4
+    // int num_channels = prediction.cols;
+    int num_classes = prediction.cols - 4; // x, y, w, h are first 4
 
-    // Scaling factors. We padded the image to be square (max_dim x max_dim).
-    // The network output corresponds to that square image resized to input_w_ x input_h_.
-    int max_dim = std::max(img_size.width, img_size.height);
-    float x_factor = (float)max_dim / input_w_;
-    float y_factor = (float)max_dim / input_h_;
+    // Scaling factors should use max dimension due to letterbox padding in preprocess
+    float factor = 0.5f;
 
     for (int i = 0; i < num_anchors; i++) {
         const float* row_ptr = prediction.ptr<float>(i);
@@ -302,12 +249,42 @@ void YoloOpenCVDetector::extract_detections(const cv::Mat& prediction, const cv:
         cv::minMaxLoc(cv::Mat(1, num_classes, CV_32F, (void*)classes_scores), 0, &max_class_score, 0, &class_id_point);
 
         if (max_class_score > config_.confidence_threshold) {
-            float cx = row_ptr[0];
-            float cy = row_ptr[1];
-            float w = row_ptr[2];
-            float h = row_ptr[3];
+            float w = row_ptr[0];
+            float h = row_ptr[1];
+            float cx = row_ptr[2];
+            float cy = row_ptr[3];
 
-            boxes.push_back(scale_coords(cx, cy, w, h, x_factor, y_factor));
+            // // Debug first detection
+            // static bool first_log = true;
+            // if (first_log) {
+                 RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "Raw Box[0]: cx=%f cy=%f w=%f h=%f score=%f", cx, cy, w, h, max_class_score);
+            //      first_log = false;
+            // }
+
+            
+
+            // Assume x1, y1, x2, y2 format because w,h interpretation led to "too big" boxes
+            // (If w is actually x2, it's a coordinate ~640, interpreted as width ~640)
+            float x1 = cx;
+            float y1 = cy;
+            float x2 = w;
+            float y2 = h;
+
+            int left = int(x1 * factor);
+            int top = int(y1 * factor);
+            int width = int(h); // Note: Using h for width and w for height due to observed format
+            int height = int(w);
+            
+            left = left - width;
+            top = top - height;
+
+            // Clip to image bounds
+            left = std::max(0, left);
+            top = std::max(0, top);
+            if (left + width > img_size.width) width = img_size.width - left;
+            if (top + height > img_size.height) height = img_size.height - top;
+
+            boxes.push_back(cv::Rect(left, top, 2*width, 2*height));
             confidences.push_back((float)max_class_score);
             class_ids.push_back(class_id_point.x);
         }

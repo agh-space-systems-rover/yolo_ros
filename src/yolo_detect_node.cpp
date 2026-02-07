@@ -31,6 +31,7 @@ YoloDetectNode::YoloDetectNode(const rclcpp::NodeOptions & options)
     declare_parameter("annotated_transport", "compressed");
     declare_parameter("debug_mode", false);
     declare_parameter("rgbd_ids", std::vector<std::string>());
+    declare_parameter("rate", 10.0);
 }
 
 /**
@@ -121,18 +122,6 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycl
 
         if (!rgbd_ids_.empty()) {
             std::string id = rgbd_ids_[i];
-            // Assuming IDs like "d455_front"
-            // Construct absolute topics based on user request
-            // Color: /<id>/color/image_raw
-            // Depth: /<id>/depth/image_raw
-            // Info:  /<id>/color/camera_info
-            
-            // Ensure ID doesn't have leading slash for consistency if we prepend /
-            // But usually ID is just "d455_front". 
-            // We want "/d455_front/..."
-            
-            // If the ID passed is already absolute path-like (starts with /), handle that?
-            // User launch file: "d455_front d455_back" -> clean strings.
             
             std::string prefix = "/" + id;
             if (id.front() == '/') prefix = id; // if already starts with /
@@ -197,10 +186,8 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycl
     }
 
     // Rate Timer
-    // 10 Hz default
-    double rate = 1.0; 
-    get_parameter_or("rate", rate, 10.0);
-    timer_ = create_wall_timer(std::chrono::milliseconds((int)(1000.0/rate)), 
+    double rate = get_parameter("rate").as_double();
+    timer_ = rclcpp::create_timer(this, get_clock(), std::chrono::milliseconds((int)(1000.0/rate)), 
         std::bind(&YoloDetectNode::timer_callback, this));
     
     RCLCPP_INFO(get_logger(), "YOLO Node Activated");
@@ -286,25 +273,33 @@ void YoloDetectNode::timer_callback() {
     
     
     if (!gather_images(infer_batch, infer_indices)) return;
-    RCLCPP_INFO(get_logger(), "Gathering images for inference, current batch size: %zu", infer_batch.size());
-    if (!infer_batch.empty()) {
-        RCLCPP_INFO(get_logger(), "First image size: %dx%d, type: %d", 
-            infer_batch[0].cols, infer_batch[0].rows, infer_batch[0].type());
-    }
+
 
 
     // 2. Inference
-    RCLCPP_INFO(get_logger(), "Running inference on batch of %zu images", infer_batch[0].empty() ? 0 : infer_batch.size());
     auto results_batch = detector_->detect(infer_batch);
-    RCLCPP_INFO(get_logger(), "Publishing annotated images, received %zu inference results", results_batch.size());
 
     // 3. Process to 3D Detections
     std::vector<Detection3D> all_detections_3d = process_detections(infer_batch, infer_indices, results_batch);
-    RCLCPP_INFO(get_logger(), "Processed %zu 3D detections", all_detections_3d.size());
+    if (debug_mode_) {
+        RCLCPP_INFO(get_logger(), "Processed %zu 3D detections", all_detections_3d.size());
+    }
+
+    rclcpp::Time tracking_time = get_clock()->now();
+    if (!all_detections_3d.empty()) {
+        tracking_time = all_detections_3d[0].header.stamp;
+    } else if (!infer_indices.empty()) {
+         int cam_idx = infer_indices[0];
+         if (cam_idx >= 0 && cam_idx < (int)cameras_.size() && cameras_[cam_idx]->last_color) {
+             tracking_time = cameras_[cam_idx]->last_color->header.stamp;
+         }
+    }
 
     // 4. Tracker & TF
-    auto final_detections = tracker_->process(all_detections_3d, tf_buffer_, world_frame_, get_clock()->now());
-    RCLCPP_INFO(get_logger(), "Processed %zu final detections", final_detections.size());
+    auto final_detections = tracker_->process(all_detections_3d, tf_buffer_, world_frame_, tracking_time);
+    if (debug_mode_) {
+        RCLCPP_INFO(get_logger(), "Processed %zu final detections", final_detections.size());
+    }
     // 5. Publish
     if (!final_detections.empty()) {
         publish_detections(final_detections);
@@ -312,7 +307,9 @@ void YoloDetectNode::timer_callback() {
     
     // 6. Annotated Images (Visualization)
     if (publish_annotated_) {
-        RCLCPP_INFO(get_logger(), "Publishing annotated images, received %zu inference results", results_batch.size());
+        if (debug_mode_) {
+            RCLCPP_INFO(get_logger(), "Publishing annotated images, received %zu inference results", results_batch.size());
+        }
         publish_annotated_images(infer_batch, infer_indices, results_batch);
     }
 }

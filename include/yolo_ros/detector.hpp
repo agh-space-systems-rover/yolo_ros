@@ -98,7 +98,9 @@ namespace yolo_ros {
         std::vector<std::vector<Result2D>> detect(const std::vector<cv::Mat>& images) override;
 
     private:
+        // Using cv::dnn::Net structure for direct inference to avoid DetectionModel issues with Concat layers
         cv::dnn::Net net_;
+        
         ModelConfig config_;
         std::vector<std::string> out_names_;
         std::string input_name_;
@@ -106,7 +108,8 @@ namespace yolo_ros {
         // Input dimensions
         int input_w_ = 640;
         int input_h_ = 640;
-
+        
+        // Legacy helpers (unused with DetectionModel, but kept if needed for revert)
         cv::Mat preprocess(const cv::Mat& img);
         std::vector<Result2D> postprocess(const cv::Mat& prediction, const cv::Size& img_size);
         
