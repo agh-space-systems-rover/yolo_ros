@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include "yolo_ros/yolo_detect_node.hpp"
 #include <cv_bridge/cv_bridge.h>
 #include <filesystem>
@@ -29,6 +30,7 @@ YoloDetectNode::YoloDetectNode(const rclcpp::NodeOptions & options)
     declare_parameter("publish_annotated", true);
     declare_parameter("annotated_transport", "compressed");
     declare_parameter("debug_mode", false);
+    declare_parameter("rgbd_ids", std::vector<std::string>());
 }
 
 /**
@@ -54,6 +56,11 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_configure(const rclcpp_lifecyc
     publish_annotated_ = get_parameter("publish_annotated").as_bool();
     annotated_transport_ = get_parameter("annotated_transport").as_string();
     debug_mode_ = get_parameter("debug_mode").as_bool();
+    rgbd_ids_ = get_parameter("rgbd_ids").as_string_array();
+    
+    if (!rgbd_ids_.empty()) {
+        num_cameras_ = rgbd_ids_.size();
+    }
 
     // Init Logic Components
     detector_ = std::make_unique<YoloOpenCVDetector>();
@@ -100,15 +107,46 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycl
 
     // Setup Subscribers & Sync
     cameras_.clear();
+    RCLCPP_INFO(get_logger(), "Activating YOLO Node with %d cameras", num_cameras_);
+    // RCLCPP_INFO(get_logger(), "Cameras ids: %s", rgbd_ids_.empty() ? "None" : std::accumulate(rgbd_ids_.begin(), rgbd_ids_.end(), std::string(),
+    //     [](const std::string& a, const std::string& b) { return a + (a.empty() ? "" : ", ") + b; }));
     for (int i=0; i<num_cameras_; ++i) {
         auto cam = std::make_shared<CameraContext>();
         cam->index = i;
         
-        std::string color_base = "color" + std::to_string(i);
-        std::string depth_base = "depth" + std::to_string(i);
-        std::string info_base = "info" + std::to_string(i);
-        std::string annotated_base = "annotated" + std::to_string(i);
-        
+        std::string color_base;
+        std::string depth_base;
+        std::string info_base;
+        std::string annotated_base;
+
+        if (!rgbd_ids_.empty()) {
+            std::string id = rgbd_ids_[i];
+            // Assuming IDs like "d455_front"
+            // Construct absolute topics based on user request
+            // Color: /<id>/color/image_raw
+            // Depth: /<id>/depth/image_raw
+            // Info:  /<id>/color/camera_info
+            
+            // Ensure ID doesn't have leading slash for consistency if we prepend /
+            // But usually ID is just "d455_front". 
+            // We want "/d455_front/..."
+            
+            // If the ID passed is already absolute path-like (starts with /), handle that?
+            // User launch file: "d455_front d455_back" -> clean strings.
+            
+            std::string prefix = "/" + id;
+            if (id.front() == '/') prefix = id; // if already starts with /
+            
+            color_base = prefix + "/color/image_raw";
+            depth_base = prefix + "/depth/image_raw";
+            info_base = prefix + "/color/camera_info";
+            annotated_base = prefix + "/yolo_annotated";
+        } else {
+            RCLCPP_ERROR(get_logger(), "Camera %d: No RGBD ID provided in 'rgbd_ids' parameter. Cannot construct topics.", i);
+        }
+
+        RCLCPP_INFO(get_logger(),"Setting up camera %d: color topic '%s', depth topic '%s', info topic '%s'", 
+            i, color_base.c_str(), depth_base.c_str(), info_base.c_str());
         // QoS
         rmw_qos_profile_t custom_qos = rmw_qos_profile_default;
 
@@ -128,7 +166,8 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycl
         // --- Depth Subscription (Raw or Compressed) ---
         if (depth_transport_ == "compressed") {
              // Usually depth compressed is "compressedDepth" png, cv_bridge handles closest match
-             auto sub = std::make_shared<CompressedSubscriberWrapper>(this, depth_base + "/compressed", custom_qos);
+             // User requested /d455_front/depth/image_raw/compressedDepth
+             auto sub = std::make_shared<CompressedSubscriberWrapper>(this, depth_base + "/compressedDepth", custom_qos);
              cam->depth_sub = std::shared_ptr<message_filters::SimpleFilter<sensor_msgs::msg::Image>>(sub, sub.get());
              cam->depth_sub_handle = sub; 
         } else {
@@ -159,7 +198,7 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycl
 
     // Rate Timer
     // 10 Hz default
-    double rate = 10.0; 
+    double rate = 1.0; 
     get_parameter_or("rate", rate, 10.0);
     timer_ = create_wall_timer(std::chrono::milliseconds((int)(1000.0/rate)), 
         std::bind(&YoloDetectNode::timer_callback, this));
@@ -227,6 +266,10 @@ void YoloDetectNode::on_camera_data(
     cam->last_depth = depth;
     cam->last_info = info;
     cam->has_new_data = true;
+
+    if (debug_mode_) {
+        RCLCPP_INFO(get_logger(), "Received data from camera %d", camera_index);
+    }
 }
 
 /**
@@ -234,21 +277,34 @@ void YoloDetectNode::on_camera_data(
  * 
  */
 void YoloDetectNode::timer_callback() {
+    if (debug_mode_) {
+        RCLCPP_INFO(get_logger(), "Timer callback start");
+    }
     // 1. Gather Images
     std::vector<cv::Mat> infer_batch;
     std::vector<int> infer_indices;
     
+    
     if (!gather_images(infer_batch, infer_indices)) return;
+    RCLCPP_INFO(get_logger(), "Gathering images for inference, current batch size: %zu", infer_batch.size());
+    if (!infer_batch.empty()) {
+        RCLCPP_INFO(get_logger(), "First image size: %dx%d, type: %d", 
+            infer_batch[0].cols, infer_batch[0].rows, infer_batch[0].type());
+    }
+
 
     // 2. Inference
+    RCLCPP_INFO(get_logger(), "Running inference on batch of %zu images", infer_batch[0].empty() ? 0 : infer_batch.size());
     auto results_batch = detector_->detect(infer_batch);
-    
+    RCLCPP_INFO(get_logger(), "Publishing annotated images, received %zu inference results", results_batch.size());
+
     // 3. Process to 3D Detections
     std::vector<Detection3D> all_detections_3d = process_detections(infer_batch, infer_indices, results_batch);
-    
+    RCLCPP_INFO(get_logger(), "Processed %zu 3D detections", all_detections_3d.size());
+
     // 4. Tracker & TF
     auto final_detections = tracker_->process(all_detections_3d, tf_buffer_, world_frame_, get_clock()->now());
-    
+    RCLCPP_INFO(get_logger(), "Processed %zu final detections", final_detections.size());
     // 5. Publish
     if (!final_detections.empty()) {
         publish_detections(final_detections);
@@ -256,6 +312,7 @@ void YoloDetectNode::timer_callback() {
     
     // 6. Annotated Images (Visualization)
     if (publish_annotated_) {
+        RCLCPP_INFO(get_logger(), "Publishing annotated images, received %zu inference results", results_batch.size());
         publish_annotated_images(infer_batch, infer_indices, results_batch);
     }
 }
@@ -278,6 +335,10 @@ bool YoloDetectNode::gather_images(std::vector<cv::Mat>& images, std::vector<int
            images.push_back(img);
            indices.push_back(cam->index);
            cam->has_new_data = false; // Reset flag
+
+           if (debug_mode_) {
+               RCLCPP_INFO(get_logger(), "Gathered image from camera %d", cam->index);
+           }
         } catch (cv_bridge::Exception& e) {
            RCLCPP_ERROR(get_logger(), "cv_bridge exception: %s", e.what());
         }
@@ -301,6 +362,10 @@ std::vector<Detection3D> YoloDetectNode::process_detections(const std::vector<cv
         auto& cam_ctx = cameras_[cam_idx];
         auto& results = results_batch[i];
         
+        if (debug_mode_) {
+            RCLCPP_INFO(get_logger(), "Camera %d: %zu raw detections", cam_idx, results.size());
+        }
+
         cv::Mat depth_img;
         if (cam_ctx->last_depth) {
             try {
@@ -331,6 +396,10 @@ std::vector<Detection3D> YoloDetectNode::process_detections(const std::vector<cv
  * @param detections Vector of 3D detections to publish
  */
 void YoloDetectNode::publish_detections(const std::vector<Detection3D>& final_detections) {
+    if (debug_mode_) {
+        RCLCPP_INFO(get_logger(), "Publishing %zu final detections", final_detections.size());
+    }
+
     vision_msgs::msg::Detection2DArray msg;
     msg.header.stamp = get_clock()->now();
     msg.header.frame_id = world_frame_;

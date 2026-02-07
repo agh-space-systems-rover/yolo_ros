@@ -101,6 +101,7 @@ namespace yolo_ros {
         cv::dnn::Net net_;
         ModelConfig config_;
         std::vector<std::string> out_names_;
+        std::string input_name_;
         
         // Input dimensions
         int input_w_ = 640;

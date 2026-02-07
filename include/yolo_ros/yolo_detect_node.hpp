@@ -102,6 +102,7 @@ namespace yolo_ros {
         bool publish_annotated_;
         std::string annotated_transport_;
         bool debug_mode_;
+        std::vector<std::string> rgbd_ids_;
 
         // Objects
         std::unique_ptr<IDetector> detector_;

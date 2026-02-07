@@ -41,9 +41,9 @@ ament_target_dependencies(${PROJECT_NAME}
   OpenCV
 )
 
-add_executable(yolo_detect_node src/main.cpp)
-target_link_libraries(yolo_detect_node ${PROJECT_NAME})
-ament_target_dependencies(yolo_detect_node
+add_executable(yolo_detect_auto_activate src/main.cpp)
+target_link_libraries(yolo_detect_auto_activate ${PROJECT_NAME})
+ament_target_dependencies(yolo_detect_auto_activate
   rclcpp
   rclcpp_lifecycle
 )
@@ -58,7 +58,7 @@ target_link_libraries(${PROJECT_NAME}
 
 rclcpp_components_register_nodes(${PROJECT_NAME} "yolo_ros::YoloDetectNode")
 
-install(TARGETS ${PROJECT_NAME} yolo_detect_node
+install(TARGETS ${PROJECT_NAME} yolo_detect_auto_activate
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
