@@ -1,0 +1,3 @@
+# Post processed files to ignore in git:
+annotated/
+*.csv

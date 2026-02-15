@@ -1,0 +1,30 @@
+# Config for batch processor with arch2025 parameters
+/**:
+  ros__parameters:
+    input_folder: "src/kalman_robot/vendor/yolo_ros/images/arch_sim/" # Specify via CLI or here
+    model_path: "models/arch2025.onnx" # Will need full path if not relative
+    
+    # detection threshold
+    confidence_threshold: 0.7
+    nms_threshold: 0.4
+    score_threshold: 0.5
+    
+    # list of class names
+    class_names:
+      - white
+      - red
+      - green
+      - blue
+
+    # average real life half-width of each class in meters (matching class_radii in original config)
+    class_radii_values:
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      
+    # Camera intrinsics (defaults)
+    camera_fx: 320.0
+    camera_fy: 320.0
+    camera_cx: 320.0
+    camera_cy: 180.0

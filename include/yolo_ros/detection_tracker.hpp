@@ -27,6 +27,8 @@ namespace yolo_ros {
         DetectionGroup() = default;
         DetectionGroup(const std::string& id, const Detection3D& initial_detection, int max_history_param);
         void add_measurement(const Detection3D& det);
+        void pop_oldest(); // new method to match python logic
+        bool is_empty() const { return measurements_.empty(); }
         bool is_confirmed(int temporal_threshold) const;
         bool is_stale(const rclcpp::Time& current_time, double max_age_seconds) const;
         Detection3D get_average_detection() const;

@@ -74,9 +74,19 @@ namespace yolo_ros {
             const std_msgs::msg::Header& header
         );
 
+        /**
+         * @brief Set camera mounting parameters for ground plane projection (monocular depth estimation).
+         * 
+         * @param height_m Height of the camera above the ground in meters.
+         * @param pitch_deg Pitch angle of the camera in degrees (downward tilt is positive).
+         */
+        void set_camera_parameters(float height_m, float pitch_deg);
+
     private:
         std::map<int, float> _class_radii; // Class ID -> typical radius in meters
         const int _depth_samples;
+        float _camera_height = 0.0f; // meters
+        float _camera_pitch = 0.0f;  // degrees
 
         /**
          * @brief Get the depth from region object

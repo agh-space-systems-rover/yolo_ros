@@ -255,11 +255,11 @@ void YoloOpenCVDetector::extract_detections(const cv::Mat& prediction, const cv:
             float cy = row_ptr[3];
 
             // // Debug first detection
-            // static bool first_log = true;
-            // if (first_log) {
+            static bool first_log = true;
+            if (first_log) {
                  RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "Raw Box[0]: cx=%f cy=%f w=%f h=%f score=%f", cx, cy, w, h, max_class_score);
-            //      first_log = false;
-            // }
+                 first_log = false;
+            }
 
             
 

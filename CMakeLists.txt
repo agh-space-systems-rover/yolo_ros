@@ -48,6 +48,15 @@ ament_target_dependencies(yolo_detect_auto_activate
   rclcpp_lifecycle
 )
 
+add_executable(batch_processor src/batch_processor.cpp)
+target_link_libraries(batch_processor ${PROJECT_NAME})
+ament_target_dependencies(batch_processor
+  rclcpp
+  sensor_msgs
+  cv_bridge
+  OpenCV
+)
+
 target_include_directories(${PROJECT_NAME} PUBLIC
   ${OpenCV_INCLUDE_DIRS}
   ${cv_bridge_INCLUDE_DIRS}
@@ -58,10 +67,21 @@ target_link_libraries(${PROJECT_NAME}
 
 rclcpp_components_register_nodes(${PROJECT_NAME} "yolo_ros::YoloDetectNode")
 
-install(TARGETS ${PROJECT_NAME} yolo_detect_auto_activate
+install(TARGETS 
+  ${PROJECT_NAME} 
+  yolo_detect_auto_activate
+  batch_processor
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)

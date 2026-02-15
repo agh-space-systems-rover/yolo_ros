@@ -84,6 +84,12 @@ Detection3D DetectionGroup::get_average_detection() const {
 }
 
 // -----------------------------------------------------------------------------
+// Helper to remove oldest history if not updated
+void DetectionGroup::pop_oldest() {
+    if (!measurements_.empty()) {
+        measurements_.pop_front();
+    }
+}
 
 /**
  * @brief Construct a new Detection Tracker:: Detection Tracker object
@@ -94,7 +100,9 @@ Detection3D DetectionGroup::get_average_detection() const {
  */
 DetectionTracker::DetectionTracker(float merge_radius, int temporal_window, int temporal_threshold)
     : merge_radius_(merge_radius), temporal_window_(temporal_window), temporal_threshold_(temporal_threshold)
-{}
+{
+    // Initialize random seed if needed, though std::random_device is typical
+}
 
 
 /**
@@ -128,11 +136,17 @@ std::vector<Detection3D> DetectionTracker::process(
     // 1. Transform all incoming to World Frame
     auto world_detections = transform_to_world(new_detections, tf_buffer, target_frame);
     
-    // 2. Spatial Merge (consolidate duplicates from overlapping cameras)
-    auto merged = spatial_merge(world_detections);
+    // 2. Temporal Filter (Tracker Logic updates tracks and outputs current stable set)
+    // In Python code: temporal_filter does both spatial association to existing groups and creation of new ones.
+    // Our C++ structure separates spatial_merge (within current frame) and temporal_filter (across time).
+    // The Python `temporal_filter` function actually takes all incoming detections and updates history.
+    // It does not explicitly merge duplicates within the same frame before updating history, 
+    // BUT it checks `if np.linalg.norm(...) < group_radius` against existing groups.
+    // If we have 2 overlapping detections in the SAME frame, the Python code might add both to the same group 
+    // or different groups depending on implementation details (it pushes to first matching group).
     
-    // 3. Temporal Filter (Tracker Logic)
-    return temporal_filter(merged, current_time);
+    // To match Python logic closer:
+    return temporal_filter(world_detections, current_time);
 }
 
 /**
@@ -155,16 +169,16 @@ std::vector<Detection3D> DetectionTracker::transform_to_world(
         Detection3D det_world = det;
         try {
              // Look up transform
-             geometry_msgs::msg::PoseStamped pose_in, pose_out;
-             pose_in.header = det.header;
-             pose_in.pose.position = det.position;
-             pose_in.pose.orientation.w = 1.0;
+             geometry_msgs::msg::PointStamped point_in, point_out;
+             point_in.header = det.header;
+             point_in.point = det.position;
              
-             // Timeout 0.0 because strictly we should have the TF by now or we use latest
-             tf_buffer->transform(pose_in, pose_out, target_frame, tf2::durationFromSec(0.05));
+             // Use 0.0 timeout to just get the latest available transform or fail immediately if not available
+             // (The python script used 'Time()' which implies latest available)
+             tf_buffer->transform(point_in, point_out, target_frame, tf2::durationFromSec(0.05));
              
-             det_world.position = pose_out.pose.position;
-             det_world.header = pose_out.header;
+             det_world.position = point_out.point;
+             det_world.header = point_out.header;
              output.push_back(det_world);
         } catch (const tf2::TransformException& ex) {
             continue;
@@ -238,61 +252,87 @@ std::vector<Detection3D> DetectionTracker::spatial_merge(const std::vector<Detec
  * @return std::vector<Detection3D> Filtered and tracked 3D detections.
  */
 std::vector<Detection3D> DetectionTracker::temporal_filter(const std::vector<Detection3D>& dets, const rclcpp::Time& current_time) {
-    // Data Assocation: Nearest Neighbor
-    // Update existing groups
-    // Create new groups
-    // Delete stale groups
+    // Implement logic similar to Python's temporal_filter
     
-    // This is a simplified tracker.
+    // 1. Update existing groups with new detections
+    std::vector<bool> incoming_matched(dets.size(), false);
     
-    std::vector<bool> matched(dets.size(), false);
-    
-    // 1. Update existing tracks
+    // We iterate over a copy or modify carefully - map is fine.
     for (auto& [id, group] : history_) {
-        double best_dist = merge_radius_;
-        int best_idx = -1;
+        bool group_was_updated = false;
         
+        // Python code: iterates all incoming, checks if close to group center
+        // Adds ALL matching detections to the group.
         Detection3D center = group.get_average_detection();
         
         for (size_t i = 0; i < dets.size(); ++i) {
-            if (matched[i]) continue;
-             // Check class
+            if (incoming_matched[i]) continue; // Already assigned? Python script removes them.
+            
             if (dets[i].result2d.class_id != center.result2d.class_id) continue;
             
             float d = dist3d(dets[i].position, center.position);
-            if (d < best_dist) {
-                best_dist = d;
-                best_idx = i;
+            // Uses group radius (merge_radius_)
+            if (d < merge_radius_) {
+                group.add_measurement(dets[i]);
+                incoming_matched[i] = true;
+                group_was_updated = true;
             }
         }
         
-        if (best_idx != -1) {
-            group.add_measurement(dets[best_idx]);
-            matched[best_idx] = true;
+        if (!group_was_updated) {
+             // Python logic: if no match, pop oldest to "move the window"
+             // This effectively decays the track if it's not being updated.
+             group.pop_oldest();
+             if (group.is_empty()) { // Need is_empty on group
+                  // We can't erase from map while iterating easily with this loop structure.
+                  // But usually "stale" check in step 3 handles removal.
+                  // However, python script removes it immediately from history list if empty.
+                  // Here we can mark it for deletion?
+                  // Let's rely on step 3 cleaning up empty groups or stale ones.
+             }
         }
     }
     
-    // 2. Create new tracks
+    // 2. Create new groups for unmatched detections
     for (size_t i = 0; i < dets.size(); ++i) {
-        if (!matched[i]) {
+        if (!incoming_matched[i]) {
             std::string new_id = std::to_string(next_id_++);
             DetectionGroup new_group(new_id, dets[i], temporal_window_);
             history_.insert({new_group.get_id(), new_group});
         }
     }
     
-    // 3. Collect Output & Cleanup Stale
+    // 3. Filter output and Cleanup
     std::vector<Detection3D> output;
     
-    auto it = history_.begin();
-    while (it != history_.end()) {
-        // Remove if stale (e.g. 1 second no update)
-        if (it->second.is_stale(current_time, 1.0)) {
+    // We used a map, but we iterate and erase.
+    // It's safer to just iterate and handle erasures carefully.
+    
+    for (auto it = history_.begin(); it != history_.end(); ) {
+        DetectionGroup& group = it->second;
+        
+        // Remove if empty (decayed completely) or STALE (too old last update)
+        // Python logic: if empty immediately remove.
+        // Also check is_stale for cleanup (the python script doesn't check is_stale for removal explicitly inside the loop 
+        //   but relies on group.empty() after pop(), 
+        //   AND a final pass that checks stale?)
+        // Wait, python script: "if detection_group.empty(): temporal_history.remove()"
+        
+        bool remove = false;
+        if (group.is_empty()) {
+            remove = true;
+        } 
+        // Also remove if stale (safeguard)
+        else if (group.is_stale(current_time, 2.0)) { // 2.0s leeway
+            remove = true;
+        }
+        
+        if (remove) {
             it = history_.erase(it);
         } else {
-            if (it->second.is_confirmed(temporal_threshold_)) {
-                auto out = it->second.get_average_detection();
-                output.push_back(out);
+             // Only output if confirmed
+            if (group.is_confirmed(temporal_threshold_)) {
+                output.push_back(group.get_average_detection());
             }
             ++it;
         }
