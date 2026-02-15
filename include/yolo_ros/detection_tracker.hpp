@@ -1,12 +1,6 @@
 /**
  * @file detection_tracker.hpp
- * @author Mateusz Wójcik (mateuszwojcikv@gmail.com)
- * @brief 
- * @version 0.1
- * @date 2026-02-01
- * 
- * @copyright Copyright (c) 2026
- * 
+ * @description: Tracker logic implementing ITracker interface.
  */
 #pragma once
 
@@ -18,7 +12,7 @@
 #include <tf2_ros/buffer.h>
 #include <vision_msgs/msg/detection2_d_array.hpp>
 
-#include "yolo_ros/position_estimator.hpp"
+#include "yolo_ros/interfaces.hpp"
 
 namespace yolo_ros {
 
@@ -27,7 +21,7 @@ namespace yolo_ros {
         DetectionGroup() = default;
         DetectionGroup(const std::string& id, const Detection3D& initial_detection, int max_history_param);
         void add_measurement(const Detection3D& det);
-        void pop_oldest(); // new method to match python logic
+        void pop_oldest(); 
         bool is_empty() const { return measurements_.empty(); }
         bool is_confirmed(int temporal_threshold) const;
         bool is_stale(const rclcpp::Time& current_time, double max_age_seconds) const;
@@ -41,7 +35,7 @@ namespace yolo_ros {
         rclcpp::Time last_update_;
     };
 
-    class DetectionTracker {
+    class DetectionTracker : public ITracker {
     public:
         DetectionTracker(float merge_radius, int temporal_window, int temporal_threshold);
 
@@ -50,7 +44,7 @@ namespace yolo_ros {
             const std::shared_ptr<tf2_ros::Buffer>& tf_buffer,
             const std::string& target_frame,
             const rclcpp::Time& current_time
-        );
+        ) override;
 
     private:
         float merge_radius_;
@@ -58,9 +52,8 @@ namespace yolo_ros {
         int temporal_threshold_;
         int next_id_ = 1;
 
-        std::map<std::string, DetectionGroup> history_; // ID -> Group
+        std::map<std::string, DetectionGroup> history_; 
 
-        // Core logic
         std::vector<Detection3D> transform_to_world(
              const std::vector<Detection3D>& dets,
              const std::shared_ptr<tf2_ros::Buffer>& tf_buffer, 

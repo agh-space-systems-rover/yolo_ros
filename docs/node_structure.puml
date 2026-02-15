@@ -3,9 +3,9 @@ title YOLO ROS Node Structure
 skinparam classAttributeIconSize 0
 skinparam linetype ortho
 
-package "yolo_ros_cpp" {
+package "yolo_ros" {
 
-    ' --- Główny Node ROS ---
+    ' --- Orchestrator ---
     class YoloDetectNode {
         -- Lifecycle --
         +on_configure(state: State) : CallbackReturn
@@ -15,105 +15,118 @@ package "yolo_ros_cpp" {
         +on_shutdown(state: State) : CallbackReturn
         
         -- Callbacks --
-        -on_camera_data(color, depth, info, camera_index)
         -timer_callback()
         
-        -- Members --
-        -detector: unique_ptr<IDetector>
-        -estimator: unique_ptr<PositionEstimator>
-        -tracker: unique_ptr<DetectionTracker>
+        -- Components --
+        -camera_man_: unique_ptr<CameraManager>
+        -detector_: unique_ptr<IDetector>
+        -estimator_: unique_ptr<IPositionEstimator>
+        -tracker_: unique_ptr<ITracker>
+        -visualizer_: unique_ptr<Visualizer>
         
-        -tf_buffer: shared_ptr<Buffer>
-        -tf_listener: shared_ptr<TransformListener>
+        -- ROS Interfaces --
+        -tf_buffer_: shared_ptr<Buffer>
+        -tf_listener_: shared_ptr<TransformListener>
+        -detection_pub_: LifecyclePublisher<Detection2DArray>
+    }
+
+    ' --- Camera Management ---
+    class CameraManager {
+        +configure(num_cameras, rgbd_ids, ...)
+        +activate()
+        +deactivate()
+        +gather_images() : vector<CameraData>
         
         -cameras_: vector<shared_ptr<CameraContext>>
-        -params: (num_cameras, publish_annotated, etc.)
+        -on_camera_data(...)
+    }
+
+    struct CameraData {
+        +color: cv::Mat
+        +depth: cv::Mat
+        +info: CameraInfo
+        +header: Header
+        +camera_index: int
     }
 
     struct CameraContext {
         +index: int
-        +color_sub: shared_ptr<SimpleFilter<Image>>
-        +depth_sub: shared_ptr<SimpleFilter<Image>>
-        +info_sub: shared_ptr<Subscriber<CameraInfo>>
         +sync: shared_ptr<Synchronizer>
-        +annotated_pub: shared_ptr<Publisher>
         +has_new_data: bool
     }
     
     class CompressedSubscriberWrapper {
         +CompressedSubscriberWrapper(node, topic, qos)
-        -sub_: Subscription<CompressedImage>
-        -signalMessage(image: Image)
     }
 
-    ' --- Warstwa Inferencji (niezależna od ROS) ---
+    CameraManager *-- CameraContext
+    CameraManager ..> CameraData
+    CameraContext -- CompressedSubscriberWrapper : uses
+
+    ' --- Visualization ---
+    class Visualizer {
+        +setup_publishers(rgbd_ids)
+        +set_class_names(names)
+        +publish_annotated_images(images, indices, results)
+        
+        -annotated_pubs_: vector<LifecyclePublisher<Image>>
+        -get_color(id) : Scalar
+    }
+
+    ' --- Interfaces ---
     interface IDetector {
-        +{abstract} load(model_path: string, config: Config) : bool
-        +{abstract} detect(images: vector<cv::Mat>) : vector<vector<Result2D>>
+        +{abstract} load(model_path, config) : bool
+        +{abstract} detect(images) : vector<vector<Result2D>>
     }
 
-    class YoloOpenCVDetector {
-        +load(model_path: string, config: Config) : bool
-        +detect(images: vector<cv::Mat>) : vector<vector<Result2D>>
+    interface IPositionEstimator {
+        +{abstract} set_class_radii(radii)
+        +{abstract} compute_3d(detection, depth, info) : Detection3D
+    }
+
+    interface ITracker {
+        +{abstract} process(detections, tf_buffer, frame, time) : vector<Detection3D>
+    }
+
+    ' --- Implementations ---
+    class YoloOpenCVDetector implements IDetector {
+        +load(model_path, config) : bool
+        +detect(images) : vector<vector<Result2D>>
         -net : cv::dnn::Net
     }
 
-    struct Result2D {
-        +id: int
-        +class_id: int
-        +score: float
-        +bbox: cv::Rect
+    class PositionEstimator implements IPositionEstimator {
+        +compute_3d(...) : Detection3D
+        -sample_depth_from_region(...)
     }
 
-    ' --- Warstwa Obliczeń 3D (niezależna od bibliotek ML) ---
-    class PositionEstimator {
-        +set_parameters(class_radii: map<int, float>)
-        +compute_3d(detection: Result2D, depth: cv::Mat, info: CameraModel) : Detection3D
-        
-        -sample_depth_from_region(...)
-        -estimate_from_radius(...)
-        -project_pixel_to_3d(...)
+    class DetectionTracker implements ITracker {
+        +process(...) : vector<Detection3D>
+        -history_: map<int, DetectionGroup>
+    }
+
+    struct Result2D {
+        +class_id: int
+        +score: float
+        +bbox: Rect
     }
     
     struct Detection3D {
         +result2d: Result2D
-        +position: geometry_msgs::Point
-        +header: std_msgs::Header
+        +position: Point
+        +header: Header
     }
 
-    ' --- Warstwa Logiki Biznesowej i Śledzenia ---
-    class DetectionTracker {
-        +update(new_detections: vector<Detection3D>, tf_buffer: Buffer, target_frame: string) : vector<Detection3D>
-        
-        -transform_to_world(...)
-        -spatial_merge(detections)
-        -temporal_filter(detections)
-        
-        -history: map<int, DetectionGroup>
-    }
+    ' --- Relationships ---
+    YoloDetectNode *-- CameraManager
+    YoloDetectNode *-- Visualizer
+    YoloDetectNode o-- IDetector
+    YoloDetectNode o-- IPositionEstimator
+    YoloDetectNode o-- ITracker
+    
+    IDetector ..> Result2D
+    IPositionEstimator ..> Detection3D
+    ITracker ..> Detection3D
 
-    class DetectionGroup {
-        +add_measurement(det: Detection3D)
-        +is_confirmed() : bool
-        +get_state() : Detection3D
-        -measurements: deque<Detection3D>
-    }
 }
-
-' Relacje
-YoloDetectNode *-- IDetector
-YoloDetectNode *-- PositionEstimator
-YoloDetectNode *-- DetectionTracker
-YoloDetectNode *-- CameraContext : manages many
-CameraContext ..> CompressedSubscriberWrapper : uses for compressed
-
-IDetector <|.. YoloOpenCVDetector
-IDetector ..> Result2D : produces
-
-PositionEstimator ..> Result2D : uses
-PositionEstimator ..> Detection3D : produces
-
-DetectionTracker *-- DetectionGroup
-DetectionTracker ..> Detection3D : processes
-
 @enduml

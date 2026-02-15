@@ -1,75 +1,51 @@
 @startuml cpp_structure
-title YOLO ROS C++ Structure
+title YOLO ROS C++ Logic Flow
 
 start
 
 partition "Lifecycle: on_configure()" {
-  :Load Parameters & Models (YoloOpenCVDetector::load);
-  :Initialize Components (Detector, Estimator, Tracker);
-  :Configure Publishers;
+  :Init CameraManager;
+  :Init Visualizer;
+  :Detector->load();
+  :Init Estimator & Tracker;
 }
 
 partition "Lifecycle: on_activate()" {
-  :Create Subscriptions (message_filters / CompressedWrapper);
-  :Create Timer (create_wall_timer);
+  :CameraManager->configure() & activate();
+  :Visualizer->setup_publishers();
+  :Create Timer;
 }
 
 partition "timer_callback()" {
-
-  ' Main Loop
-  :Iterate over cameras;
-  if (has_new_data?) then (No)
-    :Skip iteration;
-  else (Yes)
   
-    :Convert Images (cv_bridge::toCvCopy);
+  :CameraManager->gather_images();
+  if (No new data?) then (Yes)
+    :Return;
+  endif
 
-    ' Inference
-    partition "YoloOpenCVDetector::detect()" {
-      :cv::dnn::blobFromImage;
-      :net.forward();
-      :NMSBoxes (Non-Maximum Suppression);
-    }
+  partition "Inference" {
+    :Detector->detect(images);
+  }
+  
+  partition "Process Detections" {
+    while (For each camera data?)
+      :Select depth & info;
+      while (For each detection?)
+        :Estimator->compute_3d(result, depth, info);
+        note right: Deprojection & Sampling
+      endwhile
+    endwhile
+  }
 
-    ' Post-processing 3D
-    if (Objects detected?) then (No)
-      :End;
-    else (Yes)
-      
-      partition "PositionEstimator::compute_3d()" {
-        if (!depth_image.empty()?) then (Yes)
-          :get_depth_from_region();
-          note right: Monte Carlo\nRandom Sampling
-        else (No)
-          :z = -1.0;
-        endif
-
-        if (z <= 0.0?) then (Yes)
-          :estimate_depth_from_size();
-          note right: Fallback based on\nknown valid radius
-        endif
-        
-        if (z > 0.0?) then (Yes)
-          :Pinhole Projection\n(X,Y,Z) = f(u,v,z,fx,fy);
-        else (No)
-           :Reject or set (0,0,0);
-        endif
-      }
-
-      partition "DetectionTracker::process()" {
-        :transform_to_world() (TF2);
-        :Update History & Filter;
-      }
-    endif
-
-    ' Publish
-    :detection_pub_->publish();
-
-    if (publish_annotated_?) then (Yes)
-      :Draw BBoxes on Image;
-      :annotated_pub->publish();
-    endif
-
+  partition "Tracking" {
+     :Tracker->process(d3d_list, tf_buffer, ...);
+     note right: Merging & Temporal Filtering
+  }
+  
+  :Publish Detections;
+  
+  if (publish_annotated?) then (Yes)
+    :Visualizer->publish_annotated_images();
   endif
 
 }

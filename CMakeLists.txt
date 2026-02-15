@@ -24,6 +24,8 @@ add_library(${PROJECT_NAME} SHARED
   src/detector.cpp
   src/position_estimator.cpp
   src/detection_tracker.cpp
+  src/camera_manager.cpp
+  src/visualizer.cpp
 )
 ament_target_dependencies(${PROJECT_NAME}
   rclcpp
