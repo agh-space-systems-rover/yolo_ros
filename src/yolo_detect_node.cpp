@@ -2,6 +2,7 @@
 #include "yolo_ros/position_estimator.hpp"
 #include "yolo_ros/detection_tracker.hpp"
 #include <cv_bridge/cv_bridge.h>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 
 namespace yolo_ros {
 
@@ -98,6 +99,9 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycl
     if (detection_pub_) {
         detection_pub_->on_activate();
     }
+    if (publish_tf_ && !tf_broadcaster_) {
+        tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+    }
 
     // Configure and Activate Camera Manager
     camera_man_->configure(num_cameras_, rgbd_ids_, color_transport_, depth_transport_, subscribe_depth_);
@@ -118,6 +122,7 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycl
 YoloDetectNode::CallbackReturn YoloDetectNode::on_deactivate(const rclcpp_lifecycle::State & state) {
     timer_.reset();
     camera_man_->deactivate();
+    tf_broadcaster_.reset();
     if (detection_pub_) {
         detection_pub_->on_deactivate();
     }
@@ -133,6 +138,7 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_cleanup(const rclcpp_lifecycle
     visualizer_.reset();
     tf_buffer_.reset();
     tf_listener_.reset();
+    tf_broadcaster_.reset();
     detection_pub_.reset();
     return CallbackReturn::SUCCESS;
 }
@@ -256,10 +262,46 @@ void YoloDetectNode::publish_detections(const std::vector<Detection3D>& final_de
     }
 
     detection_pub_->publish(msg);
+    if (publish_tf_ && tf_broadcaster_) {
+        publish_detection_tfs(final_detections, msg.header);
+    }
     RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 2000,
         "Sent %zu detections on topic '%s' in frame '%s'",
         msg.detections.size(), detection_pub_->get_topic_name(), msg.header.frame_id.c_str());
+}
+
+void YoloDetectNode::publish_detection_tfs(const std::vector<Detection3D>& detections, const std_msgs::msg::Header& header) {
+    std::vector<geometry_msgs::msg::TransformStamped> transforms;
+    transforms.reserve(detections.size());
+
+    for (const auto& det : detections) {
+        geometry_msgs::msg::TransformStamped tf_msg;
+        tf_msg.header = header;
+
+        std::string class_name;
+        if (det.result2d.class_id >= 0 && det.result2d.class_id < (int)class_names_.size()) {
+            class_name = class_names_[det.result2d.class_id];
+        } else {
+            class_name = std::to_string(det.result2d.class_id);
+        }
+
+        tf_msg.child_frame_id = "yolo_" + class_name + "_" + std::to_string(det.result2d.id);
+        tf_msg.transform.translation.x = det.position.x;
+        tf_msg.transform.translation.y = det.position.y;
+        tf_msg.transform.translation.z = det.position.z;
+        tf_msg.transform.rotation.w = 1.0;
+
+        transforms.push_back(std::move(tf_msg));
+    }
+
+    if (!transforms.empty()) {
+        tf_broadcaster_->sendTransform(transforms);
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Sent %zu YOLO TF transforms in frame '%s'",
+            transforms.size(), header.frame_id.c_str());
+    }
 }
 
 } // namespace yolo_ros

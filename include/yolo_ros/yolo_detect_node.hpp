@@ -18,6 +18,7 @@
 #include <vision_msgs/msg/detection2_d_array.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <tf2_ros/transform_broadcaster.h>
 
 #include "yolo_ros/detector.hpp"
 #include "yolo_ros/interfaces.hpp"
@@ -73,6 +74,7 @@ namespace yolo_ros {
         // ROS Interfaces
         std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
         std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+        std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
         rclcpp_lifecycle::LifecyclePublisher<vision_msgs::msg::Detection2DArray>::SharedPtr detection_pub_;
         
@@ -99,5 +101,13 @@ namespace yolo_ros {
          * @param detections Vector of 3D detections to publish
          */
         void publish_detections(const std::vector<Detection3D>& detections);
+
+        /**
+         * @brief Publish TF transforms for tracked detections.
+         * 
+         * @param detections Vector of tracked detections in world_frame_
+         * @param header Header used for TF frame and timestamp
+         */
+        void publish_detection_tfs(const std::vector<Detection3D>& detections, const std_msgs::msg::Header& header);
     };
 }

@@ -74,7 +74,9 @@ void Visualizer::publish_annotated_images(
             continue;
         }
 
-        msg->header.stamp = node_->get_clock()->now(); 
+        // Use current time for annotated images (they are newly generated)
+        msg->header.stamp = node_->get_clock()->now();
+        // Note: frame_id could be set to camera optical frame if needed, but typically not required for visualization
         
         annotated_pubs_[cam_idx]->publish(*msg);
     }

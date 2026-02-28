@@ -203,9 +203,9 @@ Detection3D PositionEstimator::compute_3d(
     det_3d.position.y = y_cam;
     det_3d.position.z = z_cam;
 
-    RCLCPP_INFO(rclcpp::get_logger("PositionEstimator"), 
-        "Position estimated: x=%.3f y=%.3f z=%.3f (class_id=%d) [Source: %s]", 
-        det_3d.position.x, det_3d.position.y, det_3d.position.z, detection.class_id, depth_source.c_str());
+    // RCLCPP_INFO(rclcpp::get_logger("PositionEstimator"), 
+    //     "Position estimated: x=%.3f y=%.3f z=%.3f (class_id=%d) [Source: %s]", 
+    //     det_3d.position.x, det_3d.position.y, det_3d.position.z, detection.class_id, depth_source.c_str());
 
     return det_3d;
 }

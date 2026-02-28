@@ -64,7 +64,7 @@ void CameraManager::activate() {
             if (id.front() == '/') prefix = id; 
             
             color_base = prefix + "/color/image_raw";
-            depth_base = prefix + "/depth/image_raw"; // Or aligned_depth_to_color? sticking to original logic
+            depth_base = prefix + "/depth/image_raw";
             info_base = prefix + "/color/camera_info";
         } else {
              RCLCPP_ERROR(node_->get_logger(), "Camera %d: No ID provided.", i);
@@ -91,17 +91,7 @@ void CameraManager::activate() {
         // Always subscribe to satisfy sync policy (approximate time needs inputs)
         // If 'subscribe_depth' is false, we might receive nulls or just ignore in processing, 
         // but for sync to trigger, we need messages on all inputs unless we use optional policy.
-        // The original code subscribed unconditionally.
-        std::string depth_topic = depth_base;
         if (depth_transport_ == "compressed") {
-             // For compressed depth, typically "16UC1" or "32FC1" result.
-             // Pass "passthrough" or specific if needed. 
-             // "compressedDepth" usually decodes to 16UC1 or 32FC1 depending on config.
-             // Let's use "passthrough" (empty string in cv_bridge means keep source encoding)
-             // But CompressedSubscriberWrapper defaults empty to BGR8. So pass "passthrough" explicitly?
-             // No, standard cv_bridge::toCvCopy(msg, "passthrough") works.
-             // But my wrapper defaults empty to BGR8.
-             // So I pass "passthrough".
             auto sub = std::make_shared<CompressedSubscriberWrapper>(node_, depth_base + "/compressedDepth", custom_qos, "passthrough");
             cam->depth_sub = std::shared_ptr<message_filters::SimpleFilter<sensor_msgs::msg::Image>>(sub, sub.get());
             cam->depth_sub_handle = sub; 
@@ -162,7 +152,7 @@ std::vector<CameraData> CameraManager::gather_images() {
         }
 
         // Convert Depth
-        if (cam->last_depth) {
+        if (cam->last_depth && subscribe_depth_) {
             try {
                  // Try to convert to 32FC1 or 16UC1
                  // If already correct encoding, toCvCopy handles it.
@@ -175,10 +165,10 @@ std::vector<CameraData> CameraManager::gather_images() {
                      // Try autodetect or force float
                      data.depth = cv_bridge::toCvCopy(cam->last_depth, sensor_msgs::image_encodings::TYPE_32FC1)->image;
                  }
-            } catch (...) {
-                 // Ignore if depth fails? Or push empty?
-                 // If subscribe_depth is false, we might get dummy depth?
-                 // If real depth fails, just keep empty matrix.
+            } catch (cv_bridge::Exception& e) {
+                 RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                     "Failed to convert depth image for camera %d: %s", cam->index, e.what());
+                 // Keep depth empty on conversion failure
             }
         }
         
