@@ -9,14 +9,120 @@
  * 
  */
 #include "yolo_ros/detector.hpp"
+#include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <sstream>
+#include <opencv2/core/cuda.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 const int MAX_UINT8 = 255;
 
 
 namespace yolo_ros {
+namespace {
+
+void check_model_file_exists(const std::string& model_path, bool& exists) {
+    std::ifstream file(model_path.c_str());
+    exists = file.good();
+}
+
+void log_runtime_info() {
+    RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector: Runtime OpenCV Version: %s", CV_VERSION);
+}
+
+void format_targets_string(const std::vector<cv::dnn::Target>& targets, std::string& out_text) {
+    if (targets.empty()) {
+        out_text = "none";
+        return;
+    }
+
+    std::ostringstream ss;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        if (i > 0) {
+            ss << ",";
+        }
+        ss << static_cast<int>(targets[i]);
+    }
+    out_text = ss.str();
+}
+
+void log_available_dnn_targets() {
+    const auto opencv_targets = cv::dnn::getAvailableTargets(cv::dnn::DNN_BACKEND_OPENCV);
+    const auto cuda_targets = cv::dnn::getAvailableTargets(cv::dnn::DNN_BACKEND_CUDA);
+
+    std::string opencv_targets_text;
+    std::string cuda_targets_text;
+    format_targets_string(opencv_targets, opencv_targets_text);
+    format_targets_string(cuda_targets, cuda_targets_text);
+
+    RCLCPP_INFO(
+        rclcpp::get_logger("yolo_opencv"),
+        "YoloOpenCVDetector: DNN available targets (backend=OPENCV): %s",
+        opencv_targets_text.c_str());
+    RCLCPP_INFO(
+        rclcpp::get_logger("yolo_opencv"),
+        "YoloOpenCVDetector: DNN available targets (backend=CUDA): %s",
+        cuda_targets_text.c_str());
+}
+
+void try_enable_cuda_backend(cv::dnn::Net& net, bool& using_cuda) {
+    using_cuda = false;
+
+    const auto cuda_targets = cv::dnn::getAvailableTargets(cv::dnn::DNN_BACKEND_CUDA);
+    const bool dnn_cuda_supported =
+        std::find(cuda_targets.begin(), cuda_targets.end(), cv::dnn::DNN_TARGET_CUDA) != cuda_targets.end();
+
+    if (!dnn_cuda_supported) {
+        RCLCPP_WARN(
+            rclcpp::get_logger("yolo_opencv"),
+            "YoloOpenCVDetector: OpenCV DNN CUDA backend is not available in this build/runtime. Falling back to CPU.");
+        return;
+    }
+
+    int cuda_device_count = 0;
+    try {
+        cuda_device_count = cv::cuda::getCudaEnabledDeviceCount();
+    } catch (const cv::Exception& e) {
+        RCLCPP_WARN(
+            rclcpp::get_logger("yolo_opencv"),
+            "YoloOpenCVDetector: Failed to query CUDA devices (%s). Falling back to CPU.",
+            e.what());
+        return;
+    }
+
+    if (cuda_device_count <= 0) {
+        RCLCPP_WARN(
+            rclcpp::get_logger("yolo_opencv"),
+            "YoloOpenCVDetector: No CUDA-enabled NVIDIA device detected. Falling back to CPU.");
+        return;
+    }
+
+    try {
+        net.setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
+        net.setPreferableTarget(cv::dnn::DNN_TARGET_CUDA);
+        RCLCPP_INFO(
+            rclcpp::get_logger("yolo_opencv"),
+            "YoloOpenCVDetector: ONNX inference backend=CUDA, target=CUDA (NVIDIA GPU devices: %d)",
+            cuda_device_count);
+        using_cuda = true;
+    } catch (const cv::Exception& e) {
+        RCLCPP_WARN(
+            rclcpp::get_logger("yolo_opencv"),
+            "YoloOpenCVDetector: CUDA requested but unavailable in OpenCV DNN (%s). Falling back to CPU.",
+            e.what());
+    }
+}
+
+void enable_cpu_backend(cv::dnn::Net& net) {
+    net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
+    net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+    RCLCPP_INFO(
+        rclcpp::get_logger("yolo_opencv"),
+        "YoloOpenCVDetector: ONNX inference backend=OPENCV, target=CPU");
+}
+
+} // namespace
 
 /**
  * @brief Load the YOLO model
@@ -29,32 +135,26 @@ namespace yolo_ros {
 bool YoloOpenCVDetector::load(const std::string& model_path, const ModelConfig& config) {
     config_ = config;
 
-    // Verify file existence
-    std::ifstream f(model_path.c_str());
-    if (!f.good()) {
+    bool model_exists = false;
+    check_model_file_exists(model_path, model_exists);
+    if (!model_exists) {
         RCLCPP_ERROR(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector Error: Model file does not exist at: %s", model_path.c_str());
         return false;
     }
-    f.close();
 
     try {
         RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector: Loading model from %s", model_path.c_str());
+        log_runtime_info();
         
         net_ = cv::dnn::readNet(model_path);
-        
-        // Optimize for CUDA if available
-#ifdef CV_CUDA
-        net_.setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
-        net_.setPreferableTarget(cv::dnn::DNN_TARGET_CUDA);
-        RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector: Using CUDA backend.");
-#else
-        net_.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
-        net_.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
-        RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector: Using CPU backend.");
-#endif
+        log_available_dnn_targets();
 
-        RCLCPP_INFO(rclcpp::get_logger("yolo_opencv"), "YoloOpenCVDetector: Runtime OpenCV Version: %s", CV_VERSION);
-        
+        bool using_cuda = false;
+        try_enable_cuda_backend(net_, using_cuda);
+        if (!using_cuda) {
+            enable_cpu_backend(net_);
+        }
+
         // Probe for layer info (optional, just for logging)
         out_names_ = net_.getUnconnectedOutLayersNames();
         // ... logging code ...
