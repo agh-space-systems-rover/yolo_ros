@@ -168,9 +168,14 @@ std::vector<Detection3D> DetectionTracker::transform_to_world(
     for (const auto& det : dets) {
         Detection3D det_world = det;
         try {
+            if (det.header.frame_id.empty()) {
+                 continue;
+             }
+
              // Look up transform
              geometry_msgs::msg::PointStamped point_in, point_out;
-             point_in.header = det.header;
+             point_in.header.frame_id = det.header.frame_id;
+             point_in.header.stamp = builtin_interfaces::msg::Time();
              point_in.point = det.position;
              
              // Use 0.0 timeout to just get the latest available transform or fail immediately if not available
@@ -178,7 +183,8 @@ std::vector<Detection3D> DetectionTracker::transform_to_world(
              tf_buffer->transform(point_in, point_out, target_frame, tf2::durationFromSec(0.05));
              
              det_world.position = point_out.point;
-             det_world.header = point_out.header;
+             det_world.header.frame_id = target_frame;
+             det_world.header.stamp = det.header.stamp;
              output.push_back(det_world);
         } catch (const tf2::TransformException& ex) {
             continue;

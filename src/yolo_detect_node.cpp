@@ -95,7 +95,9 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_configure(const rclcpp_lifecyc
 
 YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycle::State & state) {
     LifecycleNode::on_activate(state); 
-    // detection_pub_->on_activate(); // Handled by LifecycleNode default? Usually yes if created via create_publisher
+    if (detection_pub_) {
+        detection_pub_->on_activate();
+    }
 
     // Configure and Activate Camera Manager
     camera_man_->configure(num_cameras_, rgbd_ids_, color_transport_, depth_transport_, subscribe_depth_);
@@ -116,6 +118,9 @@ YoloDetectNode::CallbackReturn YoloDetectNode::on_activate(const rclcpp_lifecycl
 YoloDetectNode::CallbackReturn YoloDetectNode::on_deactivate(const rclcpp_lifecycle::State & state) {
     timer_.reset();
     camera_man_->deactivate();
+    if (detection_pub_) {
+        detection_pub_->on_deactivate();
+    }
     LifecycleNode::on_deactivate(state);
     return CallbackReturn::SUCCESS;
 }
@@ -219,12 +224,15 @@ void YoloDetectNode::publish_detections(const std::vector<Detection3D>& final_de
     }
 
     vision_msgs::msg::Detection2DArray msg;
-    msg.header.stamp = get_clock()->now();
     msg.header.frame_id = world_frame_;
+    msg.header.stamp = final_detections.front().header.stamp;
+    if (msg.header.stamp.sec == 0 && msg.header.stamp.nanosec == 0) {
+        msg.header.stamp = get_clock()->now();
+    }
 
     for (const auto& det : final_detections) {
         vision_msgs::msg::Detection2D ros_det;
-        ros_det.header = det.header; 
+        ros_det.header = msg.header;
         
         vision_msgs::msg::ObjectHypothesisWithPose hyp;
         
@@ -248,6 +256,10 @@ void YoloDetectNode::publish_detections(const std::vector<Detection3D>& final_de
     }
 
     detection_pub_->publish(msg);
+    RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Sent %zu detections on topic '%s' in frame '%s'",
+        msg.detections.size(), detection_pub_->get_topic_name(), msg.header.frame_id.c_str());
 }
 
 } // namespace yolo_ros
