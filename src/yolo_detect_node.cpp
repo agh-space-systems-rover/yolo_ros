@@ -1,7 +1,7 @@
 #include "yolo_ros/yolo_detect_node.hpp"
 #include "yolo_ros/position_estimator.hpp"
 #include "yolo_ros/detection_tracker.hpp"
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 
 namespace yolo_ros {
