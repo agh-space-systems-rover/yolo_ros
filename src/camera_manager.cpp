@@ -2,6 +2,8 @@
 
 namespace yolo_ros {
 
+const int MAX_QUEUE_SIZE = 3;
+
 CompressedSubscriberWrapper::CompressedSubscriberWrapper(
     rclcpp_lifecycle::LifecycleNode* node, const std::string& topic, 
     const rmw_qos_profile_t& qos, const std::string& target_encoding)
@@ -106,7 +108,7 @@ void CameraManager::activate() {
         cam->info_sub = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CameraInfo, rclcpp_lifecycle::LifecycleNode>>(node_, info_base, custom_qos);
         
         // Init Sync
-        cam->sync = std::make_shared<Sync1>(SyncPolicy1(10), *cam->color_sub, *cam->depth_sub, *cam->info_sub);
+        cam->sync = std::make_shared<Sync1>(SyncPolicy1(MAX_QUEUE_SIZE), *cam->color_sub, *cam->depth_sub, *cam->info_sub);
         cam->sync->registerCallback(
             std::bind(&CameraManager::on_camera_data, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, i)
         );
