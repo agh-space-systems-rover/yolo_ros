@@ -46,6 +46,7 @@ class YOLODetect(Node):
         self.declare_parameter("publish_tf", True)
         self.declare_parameter("publish_annotated", True)
         self.declare_parameter("annotated_transport", "compressed")
+        self.declare_parameter("use_luma_as_id", False)
 
         result = self.trigger_configure()
         if result != TransitionCallbackReturn.SUCCESS:
@@ -81,6 +82,7 @@ class YOLODetect(Node):
             self.publish_tf = self.get_parameter("publish_tf").value
             self.publish_annotated = self.get_parameter("publish_annotated").value
             self.annotated_transport = self.get_parameter("annotated_transport").value
+            self.use_luma_as_id = self.get_parameter("use_luma_as_id").value
 
             # Validate parameters.
             if self.num_cameras < 1:
@@ -355,6 +357,8 @@ class YOLODetect(Node):
         # # If anything was detected...
         if len(detections.detections) > 0:
             # Process detections.
+            if self.use_luma_as_id:
+                detections = node_impl.add_luminosity_to_detections(self, detections, color_images)
             detections = node_impl.add_3d_positions_to_detections(
                 self, detections, depth_images, info_msgs
             )

@@ -94,6 +94,45 @@ def detection_array_from_yolo_results(
     return detections
 
 
+def add_luminosity_to_detections(
+    node: Any,
+    detections: Detection2DArray,
+    color_images: list[Any],
+) -> Detection2DArray:
+    for i, detection in enumerate(detections.detections):
+        # get camera index encoded in pose
+        camera_index = int(detection.results[0].pose.pose.position.x + 0.5)
+        img = color_images[camera_index]
+
+        # calculate crop boundaries
+        center_x = detection.bbox.center.position.x
+        center_y = detection.bbox.center.position.y
+        half_w = detection.bbox.size_x / 2
+        half_h = detection.bbox.size_y / 2
+
+        x_min = max(0, int(center_x - half_w))
+        y_min = max(0, int(center_y - half_h))
+        x_max = min(img.shape[1], int(center_x + half_w))
+        y_max = min(img.shape[0], int(center_y + half_h))
+
+        if x_max <= x_min or y_max <= y_min:
+            detection.id = "0.0"
+            continue
+
+        # extract region of interest
+        roi = img[y_min:y_max, x_min:x_max]
+
+        # compute average luminosity using standard weights
+        # assumes bgr format from opencv
+        avg_bgr = np.mean(roi, axis=(0, 1))
+        luminosity = 0.299 * avg_bgr[2] + 0.587 * avg_bgr[1] + 0.114 * avg_bgr[0]
+
+        detection = copy.deepcopy(detection)
+        detection.id = str(float(luminosity / 255.0))
+        detections.detections[i] = detection
+
+    return detections
+
 # Approximates the 3D positions of the detections in a Detection2DArray and appends them to Detection2D elements.
 # If depth image is unavailable, self.class_radii should be used to compute the approximate 3D position.
 def add_3d_positions_to_detections(

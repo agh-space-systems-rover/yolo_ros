@@ -135,7 +135,8 @@ class DetectionGroup:
 
     # Adds a recent detection to the group.
     def push(self, detection: Detection2D) -> None:
-        detection.id = self.id
+        if len(detection.id) == 0:
+            detection.id = self.id
         self.detections.append(detection)  # right side
 
     # average of the positions of all detections in the group
