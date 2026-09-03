@@ -4,7 +4,15 @@ import copy
 import cv2
 from typing import Any
 from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
-from kalman_interfaces.msg import InstanceContour, InstanceContourArray, PixelPoint
+try:
+    # Optional: only required for publishing instance contour messages.
+    from kalman_interfaces.msg import InstanceContour, InstanceContourArray, PixelPoint
+    HAS_KALMAN_INTERFACES = True
+except ModuleNotFoundError:  # pragma: no cover
+    InstanceContour = None  # type: ignore[assignment]
+    InstanceContourArray = None  # type: ignore[assignment]
+    PixelPoint = None  # type: ignore[assignment]
+    HAS_KALMAN_INTERFACES = False
 from rclpy.time import Time
 from tf2_ros import Buffer, LookupException, ConnectivityException
 
@@ -73,7 +81,9 @@ def _mask_from_yolo_result(result: Any, mask_index: int) -> np.ndarray | None:
 
 def contour_array_from_yolo_result(
     node: Any, result: Any, header: Any
-) -> InstanceContourArray:
+) -> Any | None:
+    if not HAS_KALMAN_INTERFACES:
+        return None
     output = InstanceContourArray()
     output.header = header
     output.image_height = result.orig_shape[0]

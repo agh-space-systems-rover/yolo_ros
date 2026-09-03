@@ -7,7 +7,6 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image, CompressedImage, CameraInfo
 from cv_bridge import CvBridge
 from vision_msgs.msg import Detection2DArray
-from kalman_interfaces.msg import InstanceContourArray
 from ultralytics import YOLO
 from tf2_ros import Buffer, TransformListener, TransformBroadcaster
 
@@ -48,7 +47,9 @@ class YOLODetect(Node):
         self.declare_parameter("publish_tf", True)
         self.declare_parameter("publish_annotated", True)
         self.declare_parameter("annotated_transport", "compressed")
-        self.declare_parameter("publish_contours", True)
+        # Contour publishing depends on kalman_interfaces being installed.
+        # We default it OFF so YOLO can run without that optional package.
+        self.declare_parameter("publish_contours", False)
         self.declare_parameter("contour_simplification_px", 1.5)
 
         result = self.trigger_configure()
@@ -90,6 +91,11 @@ class YOLODetect(Node):
             self.contour_simplification_px = self.get_parameter(
                 "contour_simplification_px"
             ).value
+            if self.publish_contours and not getattr(node_impl, "HAS_KALMAN_INTERFACES", False):
+                self.get_logger().warn(
+                    "publish_contours enabled but kalman_interfaces is missing; disabling contours."
+                )
+                self.publish_contours = False
 
             # Validate parameters.
             if self.num_cameras < 1:
@@ -218,12 +224,7 @@ class YOLODetect(Node):
                 Detection2DArray, "detections", 10
             )
 
-            if self.publish_contours:
-                self.contour_pubs = [
-                    self.create_publisher(InstanceContourArray, f"contours{i}", 10)
-                    for i in range(self.num_cameras)
-                ]
-
+       
             # Optionally create a TF broadcaster.
             if self.publish_tf:
                 self.tf_broadcaster = TransformBroadcaster(self)
@@ -383,13 +384,14 @@ class YOLODetect(Node):
             return
 
         headers = [msg.header for msg in color_msgs]
-        if self.publish_contours:
+        if self.publish_contours and hasattr(self, "contour_pubs"):
             for result_index, result in enumerate(results):
                 camera_index = msg_camera_indices[result_index]
                 contours = node_impl.contour_array_from_yolo_result(
                     self, result, headers[result_index]
                 )
-                self.contour_pubs[camera_index].publish(contours)
+                if contours is not None:
+                    self.contour_pubs[camera_index].publish(contours)
 
         # Convert YOLO results to Detection2DArray.
         detections: Detection2DArray = node_impl.detection_array_from_yolo_results(
