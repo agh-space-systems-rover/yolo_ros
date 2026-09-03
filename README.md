@@ -1,10 +1,10 @@
 # YOLO-ROS
 
-ROS 2 package that integrates YOLOv8 object detection as a Python node using the Ultralytics library. 
+ROS 2 package that integrates YOLOv8 object detection and segmentation as a Python node using the Ultralytics library.
 
 ## Output Specification
 
-The objects detected by the node are published to `/detections` as `vision_msgs/Detection2DArray` messages. Before publishing similar detections are merged together and then filtered temporally to eliminate flickering false positives. The node can also publish additional visualizations of the detections to `/annotatedX` (`sensor_msgs/Image`) and `/tf` (`tf2_msgs/TFMessage`).
+The objects detected by the node are published to `/detections` as `vision_msgs/Detection2DArray` messages. Before publishing similar detections are merged together and then filtered temporally to eliminate flickering false positives. Segmentation YOLO models are also supported: each detection keeps its bounding box, and masks are used internally for 3D depth sampling and no-depth size estimation when available. The Humble `vision_msgs/Detection2D` message has no mask field, so masks are not included in `/detections`. The node can also publish additional visualizations of the detections to `/annotatedX` (`sensor_msgs/Image`) and `/tf` (`tf2_msgs/TFMessage`).
 
 ## How to Launch
 

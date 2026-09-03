@@ -7,6 +7,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image, CompressedImage, CameraInfo
 from cv_bridge import CvBridge
 from vision_msgs.msg import Detection2DArray
+from kalman_interfaces.msg import InstanceContourArray
 from ultralytics import YOLO
 from tf2_ros import Buffer, TransformListener, TransformBroadcaster
 
@@ -21,10 +22,11 @@ class YOLODetect(Node):
 
         self.declare_parameter("num_cameras", 1)
         self.declare_parameter("subscribe_depth", False)
-        self.declare_parameter("color_transport", "compressed")
+        self.declare_parameter("color_transport", "raw")
         self.declare_parameter("depth_transport", "raw")
         self.declare_parameter("rate", 10.0)
         self.declare_parameter("model", "")
+        self.declare_parameter("device", "")
         self.declare_parameter("grayscale", False)
         self.declare_parameter("confidence_threshold", 0.8)
         self.declare_parameter(
@@ -46,6 +48,8 @@ class YOLODetect(Node):
         self.declare_parameter("publish_tf", True)
         self.declare_parameter("publish_annotated", True)
         self.declare_parameter("annotated_transport", "compressed")
+        self.declare_parameter("publish_contours", True)
+        self.declare_parameter("contour_simplification_px", 1.5)
 
         result = self.trigger_configure()
         if result != TransitionCallbackReturn.SUCCESS:
@@ -70,6 +74,7 @@ class YOLODetect(Node):
             self.depth_transport = self.get_parameter("depth_transport").value
             self.rate = self.get_parameter("rate").value
             self.model = os.path.abspath(self.get_parameter("model").value)
+            self.device = self.get_parameter("device").value
             self.grayscale = self.get_parameter("grayscale").value
             self.confidence_threshold = self.get_parameter("confidence_threshold").value
             self.class_names = self.get_parameter("class_names").value
@@ -81,6 +86,10 @@ class YOLODetect(Node):
             self.publish_tf = self.get_parameter("publish_tf").value
             self.publish_annotated = self.get_parameter("publish_annotated").value
             self.annotated_transport = self.get_parameter("annotated_transport").value
+            self.publish_contours = self.get_parameter("publish_contours").value
+            self.contour_simplification_px = self.get_parameter(
+                "contour_simplification_px"
+            ).value
 
             # Validate parameters.
             if self.num_cameras < 1:
@@ -131,6 +140,11 @@ class YOLODetect(Node):
                 self.get_logger().error(
                     "temporal_threshold must be non-negative. Got: "
                     + str(self.temporal_threshold)
+                )
+                return TransitionCallbackReturn.ERROR
+            if self.contour_simplification_px < 0:
+                self.get_logger().error(
+                    "contour_simplification_px must be non-negative."
                 )
                 return TransitionCallbackReturn.ERROR
             if self.temporal_threshold > self.temporal_window:
@@ -204,6 +218,12 @@ class YOLODetect(Node):
                 Detection2DArray, "detections", 10
             )
 
+            if self.publish_contours:
+                self.contour_pubs = [
+                    self.create_publisher(InstanceContourArray, f"contours{i}", 10)
+                    for i in range(self.num_cameras)
+                ]
+
             # Optionally create a TF broadcaster.
             if self.publish_tf:
                 self.tf_broadcaster = TransformBroadcaster(self)
@@ -239,6 +259,9 @@ class YOLODetect(Node):
         if self.publish_tf:
             self.destroy_publisher(self.tf_broadcaster.pub_tf)
         self.destroy_publisher(self.detection_pub)
+        if self.publish_contours:
+            for publisher in self.contour_pubs:
+                self.destroy_publisher(publisher)
         for sub in self.color_subs:
             self.destroy_subscription(sub)
         for sub in self.depth_subs:
@@ -256,6 +279,7 @@ class YOLODetect(Node):
     def on_color(self, color_msg: Image | CompressedImage, i: int) -> None:
         self.last_color_msgs[i] = color_msg
         self.new_colors[i] = True
+        # self.get_logger().info("Got a frame")
 
     def on_depth(self, depth_msg: Image | CompressedImage, i: int) -> None:
         self.last_depth_msgs[i] = depth_msg
@@ -299,7 +323,12 @@ class YOLODetect(Node):
                 self.bridge.compressed_imgmsg_to_cv2(msg) for msg in color_msgs
             ]
         else:
-            color_images = [self.bridge.imgmsg_to_cv2(msg) for msg in color_msgs]
+            # Ultralytics expects OpenCV-style BGR NumPy images. Explicit
+            # conversion also handles RGB8 simulation images consistently.
+            color_images = [
+                self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+                for msg in color_msgs
+            ]
 
         if self.subscribe_depth:
             if self.depth_transport != "raw":
@@ -343,11 +372,26 @@ class YOLODetect(Node):
         # if self.subscribe_depth:
         #     depth_images = [pad_to_square(img) for img in depth_images]
 
-        # Run YOLO.
-        results = self.yolo.predict(color_images, conf=self.confidence_threshold)
+        # Run YOLO. Empty device keeps Ultralytics automatic selection.
+        predict_args = {"conf": self.confidence_threshold}
+        if self.device:
+            predict_args["device"] = self.device
+        try:
+            results = self.yolo.predict(color_images, **predict_args)
+        except Exception as error:
+            self.get_logger().error(f"YOLO inference failed: {error}")
+            return
+
+        headers = [msg.header for msg in color_msgs]
+        if self.publish_contours:
+            for result_index, result in enumerate(results):
+                camera_index = msg_camera_indices[result_index]
+                contours = node_impl.contour_array_from_yolo_result(
+                    self, result, headers[result_index]
+                )
+                self.contour_pubs[camera_index].publish(contours)
 
         # Convert YOLO results to Detection2DArray.
-        headers = [msg.header for msg in color_msgs]
         detections: Detection2DArray = node_impl.detection_array_from_yolo_results(
             self, results, headers
         )
